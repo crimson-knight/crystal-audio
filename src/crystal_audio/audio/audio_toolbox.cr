@@ -92,14 +92,8 @@ lib LibAudioToolbox
   # Called on the AudioQueue's internal OS thread.
   # CRITICAL: Never allocate Crystal objects in this callback.
 
-  alias AudioQueueInputCallback = (
-    Void*,                                    # inUserData
-    AudioQueueRef,                            # inAQ
-    AudioQueueBufferRef,                      # inBuffer
-    AudioTimeStamp*,                          # inStartTime
-    UInt32,                                   # inNumberPacketDescriptions
-    AudioStreamPacketDescription*             # inPacketDescs (may be nil)
-  ) -> Void
+  # (inUserData, inAQ, inBuffer, inStartTime, inNumPacketDescs, inPacketDescs)
+  alias AudioQueueInputCallback = (Void*, AudioQueueRef, AudioQueueBufferRef, AudioTimeStamp*, UInt32, AudioStreamPacketDescription*) -> Void
 
   # ── AudioQueue functions ─────────────────────────────────────────────────────
 

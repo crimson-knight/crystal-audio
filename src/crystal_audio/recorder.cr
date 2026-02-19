@@ -51,24 +51,16 @@ module CrystalAudio
     BUFFER_SIZE    = 0x4000_u32      # 16 KB ≈ 185ms at 44100 mono 16-bit
     NUM_BUFFERS    =         3       # triple buffering
 
-    getter source        : RecordingSource
-    getter output_path   : String
+    getter source          : RecordingSource
+    getter output_path     : String
     getter mic_output_path : String?
-    getter? recording    : Bool
+    getter? recording      : Bool
 
-    @mutex       : Mutex
-    @queue       : LibAudioToolbox::AudioQueueRef
-    @ext_file    : LibAudioToolbox::ExtAudioFileRef
-    @context     : RecordContext*
-    @system_tap  : SystemAudioCapture?
+    @mutex        : Mutex
+    @queue        : LibAudioToolbox::AudioQueueRef
+    @ext_file     : LibAudioToolbox::ExtAudioFileRef
+    @system_tap   : SystemAudioCapture?
     @sys_ext_file : LibAudioToolbox::ExtAudioFileRef
-
-    # Context struct passed to the AudioQueue C callback.
-    # Must be C-heap allocated (invisible to GC — intentionally, since no
-    # Crystal objects are stored here).
-    struct RecordContext
-      ext_file : LibAudioToolbox::ExtAudioFileRef
-    end
 
     def initialize(
       source : RecordingSource = RecordingSource::Microphone,
@@ -82,7 +74,6 @@ module CrystalAudio
       @mutex = Mutex.new
       @queue = Pointer(Void).null
       @ext_file = Pointer(Void).null
-      @context = Pointer(RecordContext).null
       @sys_ext_file = Pointer(Void).null
     end
 
@@ -122,12 +113,12 @@ module CrystalAudio
       asbd = mic_asbd
       @ext_file = open_ext_file(path, asbd)
 
-      @context = Pointer(RecordContext).malloc(1)
-      @context.value.ext_file = @ext_file
+      # ext_file is already Void* — pass it directly as user_data. No struct needed.
+      ext_file_ud = @ext_file
 
-      # AudioQueue C callback — runs on OS audio thread, must NOT allocate
+      # AudioQueue C callback — runs on OS audio thread, must NOT allocate Crystal objects
       cb = LibAudioToolbox::AudioQueueInputCallback.new do |user_data, aq, buffer_ref, _ts, _npd, _pd|
-        ctx = user_data.as(RecordContext*)
+        ext_file = user_data.as(LibAudioToolbox::ExtAudioFileRef)
         buf = buffer_ref.as(LibAudioToolbox::AudioQueueBuffer*)
         next if buf.value.audio_data_byte_size == 0
 
@@ -138,13 +129,13 @@ module CrystalAudio
         abl.buffers[0].data = buf.value.audio_data
 
         frames = buf.value.audio_data_byte_size / (BITS_PER_SAMPLE // 8)
-        LibAudioToolbox.ExtAudioFileWrite(ctx.value.ext_file, frames, pointerof(abl))
+        LibAudioToolbox.ExtAudioFileWrite(ext_file, frames, pointerof(abl))
         LibAudioToolbox.AudioQueueEnqueueBuffer(aq, buffer_ref, 0, Pointer(LibAudioToolbox::AudioStreamPacketDescription).null)
       end
 
       aq = Pointer(Void).null
       status = LibAudioToolbox.AudioQueueNewInput(
-        pointerof(asbd), cb, @context.as(Void*),
+        pointerof(asbd), cb, ext_file_ud,
         nil, nil, 0_u32, pointerof(aq)
       )
       raise "AudioQueueNewInput failed: #{status}" unless status == 0
@@ -168,9 +159,6 @@ module CrystalAudio
 
       LibAudioToolbox.ExtAudioFileDispose(@ext_file) unless @ext_file.null?
       @ext_file = Pointer(Void).null
-
-      @context.free unless @context.null?
-      @context = Pointer(RecordContext).null
     end
 
     # ── Private: system audio tap ───────────────────────────────────────────

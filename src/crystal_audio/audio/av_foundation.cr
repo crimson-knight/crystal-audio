@@ -2,29 +2,24 @@
 
 # AVFoundation bindings: AVAudioEngine, AVAudioPlayerNode, AVAudioMixerNode.
 #
-# Most methods are plain ObjC message sends (no blocks). The one exception is
-# installTapOnBus:bufferSize:format:block: which uses the block bridge.
-# See audio/block_bridge.cr for that factory.
-#
-# ARM64 note: each unique objc_msgSend signature needs a typed C cast.
-# The ObjC bridge helpers in foundation/objc_bridge.cr cover common patterns.
+# All interaction via the typed objc_msgSend aliases in foundation/objc_bridge.cr.
+# No Proc gymnastics — just direct variadic C calls.
 
 @[Link(framework: "AVFoundation")]
 lib LibAVFoundation
   # Opaque pointers — we interact entirely via objc_msgSend
-  alias AVAudioEngineRef      = Void*
-  alias AVAudioNodeRef        = Void*
-  alias AVAudioInputNodeRef   = Void*
-  alias AVAudioPlayerNodeRef  = Void*
-  alias AVAudioMixerNodeRef   = Void*
-  alias AVAudioFormatRef      = Void*
-  alias AVAudioPCMBufferRef   = Void*
-  alias AVAudioTimeRef        = Void*
-  alias AVAudioFileRef        = Void*
+  alias AVAudioEngineRef     = Void*
+  alias AVAudioNodeRef       = Void*
+  alias AVAudioPlayerNodeRef = Void*
+  alias AVAudioMixerNodeRef  = Void*
+  alias AVAudioFormatRef     = Void*
+  alias AVAudioPCMBufferRef  = Void*
+  alias AVAudioTimeRef       = Void*
+  alias AVAudioFileRef       = Void*
 end
 
 module CrystalAudio
-  # Thin wrapper around AVAudioEngine. All interaction via ObjC runtime.
+  # Thin wrapper around AVAudioEngine.
   class AudioEngine
     getter ptr : LibObjC::Id
 
@@ -46,22 +41,15 @@ module CrystalAudio
     end
 
     def attach(node : LibObjC::Id)
-      fun = Proc(LibObjC::Id, LibObjC::Sel, LibObjC::Id, Void).new(
-        LibObjC.objc_msgSend.pointer, Pointer(Void).null
-      )
-      fun.call(@ptr, ObjC.sel("attachNode:"), node)
+      ObjC.attach(@ptr, node)
     end
 
-    # connect node_a output bus 0 → node_b input bus 0 with nil format (auto)
     def connect(from : LibObjC::Id, to : LibObjC::Id, format : LibObjC::Id = Pointer(Void).null)
-      fun = Proc(LibObjC::Id, LibObjC::Sel, LibObjC::Id, LibObjC::Id, LibObjC::Id, Void).new(
-        LibObjC.objc_msgSend.pointer, Pointer(Void).null
-      )
-      fun.call(@ptr, ObjC.sel("connect:to:format:"), from, to, format)
+      ObjC.connect(@ptr, from, to, format)
     end
 
     def prepare
-      ObjC.send(@ptr, "prepare")
+      ObjC.send_void(@ptr, "prepare")
     end
 
     def start : Bool
@@ -70,11 +58,11 @@ module CrystalAudio
     end
 
     def pause
-      ObjC.send(@ptr, "pause")
+      ObjC.send_void(@ptr, "pause")
     end
 
     def stop
-      ObjC.send(@ptr, "stop")
+      ObjC.send_void(@ptr, "stop")
     end
 
     def running? : Bool
@@ -92,15 +80,15 @@ module CrystalAudio
     end
 
     def play
-      ObjC.send(@ptr, "play")
+      ObjC.send_void(@ptr, "play")
     end
 
     def pause
-      ObjC.send(@ptr, "pause")
+      ObjC.send_void(@ptr, "pause")
     end
 
     def stop
-      ObjC.send(@ptr, "stop")
+      ObjC.send_void(@ptr, "stop")
     end
 
     def playing? : Bool
@@ -113,24 +101,12 @@ module CrystalAudio
     end
 
     def volume : Float32
-      fun = Proc(LibObjC::Id, LibObjC::Sel, Float32).new(
-        LibObjC.objc_msgSend.pointer, Pointer(Void).null
-      )
-      fun.call(@ptr, ObjC.sel("volume"))
+      ObjC.send_f32(@ptr, "volume")
     end
 
-    # Schedule an audio file for playback (completion handler = nil, plays immediately).
+    # Schedule a file for playback (plays immediately, no completion callback).
     def schedule_file(file : LibObjC::Id)
-      fun = Proc(LibObjC::Id, LibObjC::Sel, LibObjC::Id, LibObjC::Id, LibObjC::Id, Void).new(
-        LibObjC.objc_msgSend.pointer, Pointer(Void).null
-      )
-      fun.call(
-        @ptr,
-        ObjC.sel("scheduleFile:atTime:completionHandler:"),
-        file,
-        Pointer(Void).null,  # atTime: nil = immediate
-        Pointer(Void).null   # completionHandler: nil
-      )
+      ObjC.schedule_file(@ptr, file)
     end
   end
 
@@ -138,20 +114,16 @@ module CrystalAudio
   class AudioMixerNode
     getter ptr : LibObjC::Id
 
-    # Use engine.main_mixer_node instead of creating a new one
+    # Typically obtained from engine.main_mixer_node rather than allocated fresh.
     def initialize(@ptr : LibObjC::Id)
     end
 
-    # Master output volume: 0.0–1.0
     def output_volume=(value : Float32)
       ObjC.set_f32(@ptr, "setOutputVolume:", value)
     end
 
     def output_volume : Float32
-      fun = Proc(LibObjC::Id, LibObjC::Sel, Float32).new(
-        LibObjC.objc_msgSend.pointer, Pointer(Void).null
-      )
-      fun.call(@ptr, ObjC.sel("outputVolume"))
+      ObjC.send_f32(@ptr, "outputVolume")
     end
   end
 end

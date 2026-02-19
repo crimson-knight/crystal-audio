@@ -1,12 +1,10 @@
 {% if flag?(:darwin) %}
 
-# ObjC runtime bridge for macOS/iOS.
-# Provides typed wrappers around objc_msgSend for the argument patterns
-# used in audio APIs. Each variant corresponds to a unique ARM64 register layout.
+# ObjC runtime bridge — binds ext/objc_helpers.c typed wrappers.
 #
-# Background: On ARM64, objc_msgSend is an assembly trampoline. Calling it
-# with incorrect argument types routes values to wrong registers and causes
-# crashes or silent corruption. Every unique signature needs its own cast.
+# Crystal cannot alias the same C symbol with different return types in one
+# lib block, so ext/objc_helpers.c provides a thin typed wrapper per call
+# signature. The C compiler handles ARM64 register placement correctly.
 
 @[Link(framework: "Foundation")]
 lib LibObjC
@@ -14,98 +12,125 @@ lib LibObjC
   alias Sel = Void*
   alias Cls = Void*
 
-  # ── Core runtime ────────────────────────────────────────────────────────────
-
-  fun objc_msgSend(receiver : Id, sel : Sel, ...) : Id
+  # Raw runtime — used for class/selector registration only
   fun objc_getClass(name : LibC::Char*) : Cls
   fun sel_registerName(name : LibC::Char*) : Sel
   fun object_getClass(obj : Id) : Cls
-
-  # Alloc/init helper (common pattern: class alloc → init)
-  fun objc_alloc = objc_alloc(cls : Cls) : Id
-
-  # ── Class/object creation helpers ───────────────────────────────────────────
+  fun objc_alloc(cls : Cls) : Id
 
   fun objc_allocateClassPair(
-    superclass : Cls,
-    name       : LibC::Char*,
+    superclass  : Cls,
+    name        : LibC::Char*,
     extra_bytes : LibC::SizeT
   ) : Cls
-
   fun objc_registerClassPair(cls : Cls)
+  fun class_addMethod(cls : Cls, name : Sel, imp : Void*, types : LibC::Char*) : Bool
+end
 
-  fun class_addMethod(
-    cls   : Cls,
-    name  : Sel,
-    imp   : Void*,
-    types : LibC::Char*
-  ) : Bool
+# Typed message-send wrappers from ext/objc_helpers.c
+lib LibObjCHelpers
+  # → Id
+  fun ca_msg_id(obj : Void*, sel : Void*) : Void*
+  fun ca_msg_id_id(obj : Void*, sel : Void*, a1 : Void*) : Void*
+  fun ca_msg_id_id_id(obj : Void*, sel : Void*, a1 : Void*, a2 : Void*) : Void*
+
+  # → Void
+  fun ca_msg_void(obj : Void*, sel : Void*)
+  fun ca_msg_void_id(obj : Void*, sel : Void*, a1 : Void*)
+  fun ca_msg_void_id_id_id(obj : Void*, sel : Void*, a1 : Void*, a2 : Void*, a3 : Void*)
+  fun ca_msg_void_id_nil_nil(obj : Void*, sel : Void*, a1 : Void*)  # scheduleFile:atTime:completionHandler:
+  fun ca_msg_void_f32(obj : Void*, sel : Void*, value : Float32)
+
+  # → Bool
+  fun ca_msg_bool(obj : Void*, sel : Void*) : Bool
+  fun ca_msg_bool_err(obj : Void*, sel : Void*, out_err : Void**) : Bool
+
+  # → Float32
+  fun ca_msg_f32(obj : Void*, sel : Void*) : Float32
+
+  # → UInt32
+  fun ca_msg_u32(obj : Void*, sel : Void*) : UInt32
+
+  # [[ClassName alloc] init]
+  fun ca_alloc_init(class_name : LibC::Char*) : Void*
 end
 
 module CrystalAudio
   module ObjC
-    # Convenience: get a class by name
+    # ── Selector / class helpers ──────────────────────────────────────────────
+
     def self.cls(name : String) : LibObjC::Cls
       LibObjC.objc_getClass(name.to_unsafe)
     end
 
-    # Convenience: register a selector
     def self.sel(name : String) : LibObjC::Sel
       LibObjC.sel_registerName(name.to_unsafe)
     end
 
-    # Allocate and initialize an ObjC object: [[ClassName alloc] init]
+    # [[ClassName alloc] init]
     def self.alloc_init(class_name : String) : LibObjC::Id
-      klass = cls(class_name)
-      obj = LibObjC.objc_alloc(klass)
-      LibObjC.objc_msgSend(obj, sel("init"))
+      obj = LibObjCHelpers.ca_alloc_init(class_name.to_unsafe)
+      raise "Failed to alloc/init #{class_name}" if obj.null?
+      obj
     end
 
-    # Send a message with no arguments, returning an Id
+    # ── Typed message senders ─────────────────────────────────────────────────
+
+    # no-arg → Id
     def self.send(receiver : LibObjC::Id, selector : String) : LibObjC::Id
-      LibObjC.objc_msgSend(receiver, sel(selector))
+      LibObjCHelpers.ca_msg_id(receiver, sel(selector))
     end
 
-    # Send a message with one Id argument
+    # one-id-arg → Id
     def self.send(receiver : LibObjC::Id, selector : String, arg : LibObjC::Id) : LibObjC::Id
-      fun = Proc(LibObjC::Id, LibObjC::Sel, LibObjC::Id, LibObjC::Id).new(
-        LibObjC.objc_msgSend.pointer, Pointer(Void).null
-      )
-      fun.call(receiver, sel(selector), arg)
+      LibObjCHelpers.ca_msg_id_id(receiver, sel(selector), arg)
     end
 
-    # Send a message returning a Bool (BOOL in ObjC)
+    # no-arg → Void
+    def self.send_void(receiver : LibObjC::Id, selector : String)
+      LibObjCHelpers.ca_msg_void(receiver, sel(selector))
+    end
+
+    # one-id-arg → Void
+    def self.send_void(receiver : LibObjC::Id, selector : String, arg : LibObjC::Id)
+      LibObjCHelpers.ca_msg_void_id(receiver, sel(selector), arg)
+    end
+
+    # no-arg → Bool (isRunning, isPlaying, etc.)
     def self.send_bool(receiver : LibObjC::Id, selector : String) : Bool
-      fun = Proc(LibObjC::Id, LibObjC::Sel, Bool).new(
-        LibObjC.objc_msgSend.pointer, Pointer(Void).null
-      )
-      fun.call(receiver, sel(selector))
+      LibObjCHelpers.ca_msg_bool(receiver, sel(selector))
     end
 
-    # Send a message returning a Float64 (for sample rate, duration, etc.)
-    def self.send_f64(receiver : LibObjC::Id, selector : String) : Float64
-      fun = Proc(LibObjC::Id, LibObjC::Sel, Float64).new(
-        LibObjC.objc_msgSend.pointer, Pointer(Void).null
-      )
-      fun.call(receiver, sel(selector))
+    # no-arg → Float32 (volume, outputVolume)
+    def self.send_f32(receiver : LibObjC::Id, selector : String) : Float32
+      LibObjCHelpers.ca_msg_f32(receiver, sel(selector))
     end
 
-    # Set a Float32 property (e.g., volume, pan)
+    # float setter (setVolume:, setOutputVolume:)
     def self.set_f32(receiver : LibObjC::Id, selector : String, value : Float32)
-      fun = Proc(LibObjC::Id, LibObjC::Sel, Float32, Void).new(
-        LibObjC.objc_msgSend.pointer, Pointer(Void).null
-      )
-      fun.call(receiver, sel(selector), value)
+      LibObjCHelpers.ca_msg_void_f32(receiver, sel(selector), value)
     end
 
-    # Send startAndReturnError: — returns Bool, takes NSError** out-parameter
+    # attachNode: / detachNode:
+    def self.attach(engine : LibObjC::Id, node : LibObjC::Id)
+      LibObjCHelpers.ca_msg_void_id(engine, sel("attachNode:"), node)
+    end
+
+    # connect:to:format:
+    def self.connect(engine : LibObjC::Id, from : LibObjC::Id, to : LibObjC::Id, format : LibObjC::Id)
+      LibObjCHelpers.ca_msg_void_id_id_id(engine, sel("connect:to:format:"), from, to, format)
+    end
+
+    # scheduleFile:atTime:completionHandler: (atTime + handler = nil)
+    def self.schedule_file(player : LibObjC::Id, file : LibObjC::Id)
+      LibObjCHelpers.ca_msg_void_id_nil_nil(player, sel("scheduleFile:atTime:completionHandler:"), file)
+    end
+
+    # startAndReturnError: → {Bool, NSError?}
     def self.start_returning_error(receiver : LibObjC::Id) : {Bool, LibObjC::Id?}
       err_ptr = Pointer(LibObjC::Id).malloc(1)
       err_ptr.value = Pointer(Void).null
-      fun = Proc(LibObjC::Id, LibObjC::Sel, Pointer(LibObjC::Id), Bool).new(
-        LibObjC.objc_msgSend.pointer, Pointer(Void).null
-      )
-      success = fun.call(receiver, sel("startAndReturnError:"), err_ptr)
+      success = LibObjCHelpers.ca_msg_bool_err(receiver, sel("startAndReturnError:"), err_ptr.as(Void**))
       err = err_ptr.value.null? ? nil : err_ptr.value
       err_ptr.free
       {success, err}
