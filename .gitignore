@@ -6,6 +6,9 @@ lib/
 *.so
 *.wasm
 bin/
+samples/*/record
+samples/*/mic_recorder
+samples/**/*.dwarf
 .DS_Store
 
 # whisper.cpp model files (large, downloaded separately)
