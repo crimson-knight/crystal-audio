@@ -1,0 +1,18 @@
+name: crystal-audio
+version: 0.1.0
+description: |
+  Cross-platform audio library for Crystal. Microphone capture, multi-track
+  playback, system audio recording, and on-device transcription via whisper.cpp.
+  macOS and iOS support with AVFoundation/CoreAudio; Android via AAudio (requires
+  the crystal-alpha compiler fork for mobile targets).
+
+authors:
+  - crimson-knight
+
+license: MIT
+
+crystal: ">= 1.15.0"
+
+targets:
+  mic_recorder:
+    main: samples/mic_recorder/main.cr

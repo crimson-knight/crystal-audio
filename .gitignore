@@ -1,0 +1,17 @@
+.shards/
+lib/
+*.o
+*.a
+*.dylib
+*.so
+*.wasm
+bin/
+.DS_Store
+
+# whisper.cpp model files (large, downloaded separately)
+models/*.bin
+models/*.mlmodelc/
+
+# Sample build outputs
+samples/**/*.o
+samples/**/build/
