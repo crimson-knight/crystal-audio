@@ -18,3 +18,6 @@ models/*.mlmodelc/
 # Sample build outputs
 samples/**/*.o
 samples/**/build/
+samples/**/*.xcodeproj/
+samples/**/crystal_audio_demo
+samples/**/DerivedData/

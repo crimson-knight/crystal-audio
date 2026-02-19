@@ -1,0 +1,41 @@
+name: CrystalAudioDemo
+options:
+  bundleIdPrefix: com.crimsonknight
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "16.0"
+
+settings:
+  base:
+    SWIFT_OBJC_BRIDGING_HEADER: "$(PROJECT_DIR)/crystal_bridge.h"
+    LIBRARY_SEARCH_PATHS:
+      - "$(PROJECT_DIR)"
+      - "$(PROJECT_DIR)/build"
+    OTHER_LDFLAGS:
+      - "-force_load"
+      - "$(PROJECT_DIR)/build/libcrystal_audio.a"
+      - "-force_load"
+      - "$(PROJECT_DIR)/build/libgc.a"
+      - "-lz"
+      - "-liconv"
+      - "-lc++"
+      - "$(PROJECT_DIR)/build/system_audio_tap_stub.o"
+      - "-framework"
+      - "AudioToolbox"
+      - "-framework"
+      - "CoreFoundation"
+
+targets:
+  CrystalAudioDemo:
+    type: application
+    platform: iOS
+    sources:
+      - path: ContentView.swift
+      - path: CrystalAudioApp.swift
+    settings:
+      base:
+        INFOPLIST_FILE: "$(PROJECT_DIR)/Info.plist"
+        PRODUCT_BUNDLE_IDENTIFIER: com.crimsonknight.CrystalAudioDemo
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO
+    dependencies: []

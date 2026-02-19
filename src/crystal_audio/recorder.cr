@@ -2,6 +2,18 @@
 
 require "mutex"
 
+# C helper that constructs AudioBufferList on the C stack and calls
+# ExtAudioFileWrite — avoids Crystal struct layout issues.
+lib LibAudioWriteHelper
+  fun ca_ext_audio_file_write_pcm(
+    ext_file : Void*,
+    data : Void*,
+    byte_size : UInt32,
+    channels : UInt32,
+    bytes_per_frame : UInt32
+  ) : Int32
+end
+
 # High-level audio recording API.
 #
 # Supports three recording modes:
@@ -116,20 +128,20 @@ module CrystalAudio
       # ext_file is already Void* — pass it directly as user_data. No struct needed.
       ext_file_ud = @ext_file
 
-      # AudioQueue C callback — runs on OS audio thread, must NOT allocate Crystal objects
+      # AudioQueue C callback — runs on OS audio thread, must NOT allocate Crystal objects.
+      # Uses C helper to construct AudioBufferList (avoids Crystal struct layout issues).
       cb = LibAudioToolbox::AudioQueueInputCallback.new do |user_data, aq, buffer_ref, _ts, _npd, _pd|
         ext_file = user_data.as(LibAudioToolbox::ExtAudioFileRef)
         buf = buffer_ref.as(LibAudioToolbox::AudioQueueBuffer*)
         next if buf.value.audio_data_byte_size == 0
 
-        abl = LibAudioToolbox::AudioBufferList.new
-        abl.number_buffers = 1
-        abl.buffers[0].number_channels = 1
-        abl.buffers[0].data_byte_size = buf.value.audio_data_byte_size
-        abl.buffers[0].data = buf.value.audio_data
-
-        frames = buf.value.audio_data_byte_size / (BITS_PER_SAMPLE // 8)
-        LibAudioToolbox.ExtAudioFileWrite(ext_file, frames, pointerof(abl))
+        LibAudioWriteHelper.ca_ext_audio_file_write_pcm(
+          ext_file,
+          buf.value.audio_data,
+          buf.value.audio_data_byte_size,
+          CHANNELS,
+          CHANNELS * (BITS_PER_SAMPLE // 8)
+        )
         LibAudioToolbox.AudioQueueEnqueueBuffer(aq, buffer_ref, 0, Pointer(LibAudioToolbox::AudioStreamPacketDescription).null)
       end
 
@@ -153,7 +165,7 @@ module CrystalAudio
 
     private def stop_mic_queue
       return if @queue.null?
-      LibAudioToolbox.AudioQueueStop(@queue, true)
+      LibAudioToolbox.AudioQueueStop(@queue, false)
       LibAudioToolbox.AudioQueueDispose(@queue, true)
       @queue = Pointer(Void).null
 
@@ -170,12 +182,14 @@ module CrystalAudio
 
       @system_tap = SystemAudioCapture.new
       @system_tap.not_nil!.start do |frames, frame_count, channel_count|
-        abl = LibAudioToolbox::AudioBufferList.new
-        abl.number_buffers = 1
-        abl.buffers[0].number_channels = channel_count
-        abl.buffers[0].data_byte_size = frame_count * channel_count * 4_u32  # float32
-        abl.buffers[0].data = frames.to_unsafe.as(Void*)
-        LibAudioToolbox.ExtAudioFileWrite(sys_file_ref, frame_count, pointerof(abl))
+        bytes_per_frame = channel_count * 4_u32  # float32
+        LibAudioWriteHelper.ca_ext_audio_file_write_pcm(
+          sys_file_ref,
+          frames.to_unsafe.as(Void*),
+          frame_count * bytes_per_frame,
+          channel_count,
+          bytes_per_frame
+        )
       end
     end
 

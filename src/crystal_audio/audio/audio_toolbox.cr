@@ -39,7 +39,7 @@ lib LibAudioToolbox
 
   struct AudioBufferList
     number_buffers : UInt32       # mNumberBuffers
-    buffers        : AudioBuffer[8]  # mBuffers (variable length; 8 covers stereo+)
+    buffers        : AudioBuffer[1]  # mBuffers (variable length; use [0] for single-buffer access)
   end
 
   # ── AudioTimeStamp (partial) ─────────────────────────────────────────────────
