@@ -13,6 +13,12 @@ module CrystalAudio
     def initialize(path : String)
       raise "File not found: #{path}" unless File.exists?(path)
 
+      # Initialize before block so Crystal doesn't consider them nilable
+      @sample_rate = 44100
+      @channels = 1
+      @bit_depth = 16
+      @samples = Slice(Float32).empty
+
       File.open(path, "rb") do |file|
         # Read RIFF header
         riff = Bytes.new(4)
@@ -25,12 +31,8 @@ module CrystalAudio
         file.read(wave)
         raise "Not a WAVE file" unless String.new(wave) == "WAVE"
 
-        # Read chunks until we find fmt and data
-        @sample_rate = 44100
-        @channels = 1
-        @bit_depth = 16
+        # Read chunks — fmt and data update instance variables
         format_tag = 1_u16  # PCM
-        @samples = Slice(Float32).empty
 
         while file.pos < file.size
           chunk_id = Bytes.new(4)
