@@ -51,6 +51,32 @@ lib LibObjCHelpers
   # → UInt32
   fun ca_msg_u32(obj : Void*, sel : Void*) : UInt32
 
+  # → Float64
+  fun ca_msg_f64(obj : Void*, sel : Void*) : Float64
+
+  # → Int64
+  fun ca_msg_i64(obj : Void*, sel : Void*) : Int64
+
+  # Void with double arg
+  fun ca_msg_void_f64(obj : Void*, sel : Void*, value : Float64)
+
+  # AVAudioFile: [[AVAudioFile alloc] initForReading:url error:&err]
+  fun ca_audio_file_open(url : Void*) : Void*
+
+  # AVAudioTime helpers
+  fun ca_audio_time_sample(sample_time : Int64, sample_rate : Float64) : Void*
+  fun ca_audio_time_get_sample(time : Void*) : Int64
+  fun ca_audio_time_get_rate(time : Void*) : Float64
+  fun ca_audio_time_valid(time : Void*) : Bool
+
+  # scheduleFile:atTime:completionHandler: with time (handler = nil)
+  fun ca_msg_void_id_id_nil(obj : Void*, sel : Void*, a1 : Void*, a2 : Void*)
+
+  # NSDictionary / NSNumber helpers
+  fun ca_nsdictionary_create(keys : Void**, values : Void**, count : UInt32) : Void*
+  fun ca_nsnumber_double(value : Float64) : Void*
+  fun ca_nsnumber_long(value : Int64) : Void*
+
   # [[ClassName alloc] init]
   fun ca_alloc_init(class_name : LibC::Char*) : Void*
 end
@@ -128,12 +154,69 @@ module CrystalAudio
 
     # startAndReturnError: → {Bool, NSError?}
     def self.start_returning_error(receiver : LibObjC::Id) : {Bool, LibObjC::Id?}
-      err_ptr = Pointer(LibObjC::Id).malloc(1)
-      err_ptr.value = Pointer(Void).null
-      success = LibObjCHelpers.ca_msg_bool_err(receiver, sel("startAndReturnError:"), err_ptr.as(Void**))
-      err = err_ptr.value.null? ? nil : err_ptr.value
-      err_ptr.free
-      {success, err}
+      err = Pointer(Void).null
+      success = LibObjCHelpers.ca_msg_bool_err(receiver, sel("startAndReturnError:"), pointerof(err).as(Void**))
+      {success, err.null? ? nil : err}
+    end
+
+    # no-arg → Float64
+    def self.send_f64(receiver : LibObjC::Id, selector : String) : Float64
+      LibObjCHelpers.ca_msg_f64(receiver, sel(selector))
+    end
+
+    # no-arg → Int64
+    def self.send_i64(receiver : LibObjC::Id, selector : String) : Int64
+      LibObjCHelpers.ca_msg_i64(receiver, sel(selector))
+    end
+
+    # double setter
+    def self.set_f64(receiver : LibObjC::Id, selector : String, value : Float64)
+      LibObjCHelpers.ca_msg_void_f64(receiver, sel(selector), value)
+    end
+
+    # detachNode:
+    def self.detach(engine : LibObjC::Id, node : LibObjC::Id)
+      LibObjCHelpers.ca_msg_void_id(engine, sel("detachNode:"), node)
+    end
+
+    # scheduleFile:atTime:completionHandler: (with time, handler = nil)
+    def self.schedule_file_at_time(player : LibObjC::Id, file : LibObjC::Id, time : LibObjC::Id)
+      LibObjCHelpers.ca_msg_void_id_id_nil(player, sel("scheduleFile:atTime:completionHandler:"), file, time)
+    end
+
+    # AVAudioFile: open for reading
+    def self.audio_file_open(url : LibObjC::Id) : LibObjC::Id
+      LibObjCHelpers.ca_audio_file_open(url)
+    end
+
+    # AVAudioTime helpers
+    def self.audio_time_sample(sample_time : Int64, sample_rate : Float64) : LibObjC::Id
+      LibObjCHelpers.ca_audio_time_sample(sample_time, sample_rate)
+    end
+
+    def self.audio_time_get_sample(time : LibObjC::Id) : Int64
+      LibObjCHelpers.ca_audio_time_get_sample(time)
+    end
+
+    def self.audio_time_get_rate(time : LibObjC::Id) : Float64
+      LibObjCHelpers.ca_audio_time_get_rate(time)
+    end
+
+    def self.audio_time_valid?(time : LibObjC::Id) : Bool
+      LibObjCHelpers.ca_audio_time_valid(time)
+    end
+
+    # NSDictionary / NSNumber creation
+    def self.nsdictionary_create(keys : Pointer(Void*), values : Pointer(Void*), count : UInt32) : LibObjC::Id
+      LibObjCHelpers.ca_nsdictionary_create(keys, values, count)
+    end
+
+    def self.nsnumber_double(value : Float64) : LibObjC::Id
+      LibObjCHelpers.ca_nsnumber_double(value)
+    end
+
+    def self.nsnumber_long(value : Int64) : LibObjC::Id
+      LibObjCHelpers.ca_nsnumber_long(value)
     end
   end
 end

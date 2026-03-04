@@ -108,6 +108,45 @@ module CrystalAudio
     def schedule_file(file : LibObjC::Id)
       ObjC.schedule_file(@ptr, file)
     end
+
+    # Schedule a file at a specific AVAudioTime (no completion callback).
+    def schedule_file_at_time(file : LibObjC::Id, time : LibObjC::Id)
+      ObjC.schedule_file_at_time(@ptr, file, time)
+    end
+
+    # Play starting at a specific AVAudioTime (for synchronized multi-track start).
+    def play_at_time(time : LibObjC::Id)
+      LibObjCHelpers.ca_msg_void_id(@ptr, LibObjC.sel_registerName("playAtTime:"), time)
+    end
+
+    # Get last render time (AVAudioTime). May be nil if node hasn't rendered yet.
+    def last_render_time : LibObjC::Id?
+      time = ObjC.send(@ptr, "lastRenderTime")
+      time.null? ? nil : time
+    end
+  end
+
+  # Wrapper around AVAudioFile for reading audio files.
+  class AVAudioFile
+    getter ptr : LibObjC::Id
+
+    # Open an audio file for reading. Raises on error.
+    def initialize(path : String)
+      url = CF.file_url(path)
+      @ptr = ObjC.audio_file_open(url)
+      LibCoreFoundation.CFRelease(url)
+      raise "Failed to open AVAudioFile: #{path}" if @ptr.null?
+    end
+
+    # Returns the file's processing format (AVAudioFormat).
+    def processing_format : LibObjC::Id
+      ObjC.send(@ptr, "processingFormat")
+    end
+
+    # File length in sample frames.
+    def length : Int64
+      ObjC.send_i64(@ptr, "length")
+    end
   end
 
   # Wrapper around AVAudioMixerNode (master volume + routing hub).

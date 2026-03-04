@@ -27,7 +27,7 @@ EXT_SYSTEM_AUDIO_TAP := ext/system_audio_tap.o
 EXT_APPKIT_HELPERS   := ext/appkit_helpers.o
 EXT_AUDIO_WRITE      := ext/audio_write_helper.o
 
-.PHONY: all ext sample spec clean macos-app ios-ext ios-lib ios-app
+.PHONY: all ext sample spec clean macos-app ios-ext ios-lib ios-app playback-test lockscreen-test android-lib android-app
 
 all: ext
 
@@ -87,6 +87,24 @@ sample: ext
 ## Run specs
 spec: ext
 	crystal spec --link-flags="$(LINK_FLAGS)"
+
+## Build and run playback test (multi-track player verification)
+playback-test: ext
+	crystal build samples/playback_test/main.cr \
+	  -o samples/playback_test/playback_test \
+	  --link-flags="$(LINK_FLAGS)"
+	@echo "  Built samples/playback_test/playback_test"
+	@echo "  Running playback test ..."
+	samples/playback_test/playback_test
+
+## Build and run lock screen controls test
+lockscreen-test: ext
+	crystal build samples/lockscreen_test/main.cr \
+	  -o samples/lockscreen_test/lockscreen_test \
+	  --link-flags="$(LINK_FLAGS) -framework MediaPlayer"
+	@echo "  Built samples/lockscreen_test/lockscreen_test"
+	@echo "  Running lock screen test ..."
+	samples/lockscreen_test/lockscreen_test
 
 ## Build macOS desktop app with graphical UI
 macos-app: ext
@@ -193,8 +211,22 @@ ios-app: ios-lib
 	@echo "  Install: xcrun simctl install booted samples/ios_app/build/DerivedData/Build/Products/Debug-iphonesimulator/CrystalAudioDemo.app"
 	@echo "  Launch:  xcrun simctl launch booted com.crimsonknight.CrystalAudioDemo"
 
+## Cross-compile Crystal shared library for Android (aarch64)
+android-lib:
+	@echo "  Building Crystal shared library for Android ..."
+	samples/android_app/build_crystal_lib.sh
+
+## Build Android app APK (requires Android SDK + Gradle)
+android-app: android-lib
+	@echo "  Building Android APK ..."
+	cd samples/android_app && ./gradlew assembleDebug
+	@echo "  Built APK: samples/android_app/app/build/outputs/apk/debug/app-debug.apk"
+
 clean:
 	rm -f ext/*.o samples/mic_recorder/mic_recorder samples/macos_app/crystal_audio_demo
+	rm -f samples/playback_test/playback_test samples/lockscreen_test/lockscreen_test
 	rm -rf samples/ios_app/build samples/ios_app/libcrystal_audio.a
 	rm -rf samples/ios_app/CrystalAudioDemo.xcodeproj
+	rm -rf samples/android_app/build samples/android_app/app/build
+	rm -rf samples/android_app/app/src/main/jniLibs
 	@echo "  Cleaned"

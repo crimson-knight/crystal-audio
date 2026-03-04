@@ -1,4 +1,57 @@
-{% if flag?(:darwin) %}
+{% if flag?(:android) %}
+
+# Android recording: delegate to AndroidRecorder (AAudio-based).
+require "mutex"
+
+module CrystalAudio
+  enum RecordingSource
+    Microphone
+    System
+    Both
+  end
+
+  enum AudioOutputFormat
+    WAV
+    AAC
+  end
+
+  class Recorder
+    getter source : RecordingSource
+    getter output_path : String
+    getter? recording : Bool
+
+    @android_recorder : AndroidRecorder?
+
+    def initialize(
+      source : RecordingSource = RecordingSource::Microphone,
+      output_path : String = "/data/local/tmp/recording.wav",
+      mic_output_path : String? = nil
+    )
+      @source = source
+      @output_path = output_path
+      @recording = false
+    end
+
+    def start
+      raise "Already recording" if @recording
+      raise "Only microphone recording is supported on Android" unless @source == RecordingSource::Microphone
+
+      rec = AndroidRecorder.new(@output_path)
+      rec.start
+      @android_recorder = rec
+      @recording = true
+    end
+
+    def stop
+      return unless @recording
+      @android_recorder.try(&.stop)
+      @android_recorder = nil
+      @recording = false
+    end
+  end
+end
+
+{% elsif flag?(:darwin) %}
 
 require "mutex"
 
