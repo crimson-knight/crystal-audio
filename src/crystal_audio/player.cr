@@ -172,6 +172,25 @@ module CrystalAudio
       @engine.render_offline(frames, out_buffer)
     end
 
+    # ── Playback position / duration (progress bar + countdown) ───────────────
+
+    # Duration of a track in seconds (from its audio file). 0.0 if index invalid.
+    def duration_seconds(index : Int32) : Float64
+      track = @tracks[index]?
+      track ? track.file.duration_seconds : 0.0
+    end
+
+    # Current playback position of a track in seconds; 0.0 before playback starts
+    # or if the index is invalid.
+    def position_seconds(index : Int32) : Float64
+      track = @tracks[index]?
+      return 0.0 unless track
+      samples = track.node.position_samples
+      return 0.0 if samples < 0
+      rate = track.file.sample_rate
+      rate > 0.0 ? samples.to_f / rate : 0.0
+    end
+
     # Start playback. Schedules files on all player nodes, starts the engine,
     # then issues a synchronized play_at_time on all nodes.
     def play

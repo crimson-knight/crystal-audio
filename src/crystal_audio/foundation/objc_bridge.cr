@@ -93,6 +93,10 @@ lib LibObjCHelpers
   # ── PCM buffer inspection (verification) ────────────────────────────────────
   fun ca_pcm_buffer_frame_length(buffer : Void*) : UInt32
   fun ca_pcm_buffer_rms(buffer : Void*, start_frame : UInt32, count : UInt32) : Float64
+
+  # ── Playback position / duration ────────────────────────────────────────────
+  fun ca_format_sample_rate(format : Void*) : Float64
+  fun ca_player_node_position_samples(node : Void*) : Int64
 end
 
 module CrystalAudio
@@ -241,6 +245,18 @@ module CrystalAudio
     # RMS amplitude of channel 0 over [start_frame, start_frame+count).
     def self.pcm_buffer_rms(buffer : LibObjC::Id, start_frame : UInt32, count : UInt32) : Float64
       LibObjCHelpers.ca_pcm_buffer_rms(buffer, start_frame, count)
+    end
+
+    # ── Playback position / duration ──────────────────────────────────────────
+
+    # AVAudioFormat.sampleRate (Hz). 0.0 on error.
+    def self.format_sample_rate(format : LibObjC::Id) : Float64
+      LibObjCHelpers.ca_format_sample_rate(format)
+    end
+
+    # AVAudioPlayerNode current position in sample frames; -1 before playback starts.
+    def self.player_node_position_samples(node : LibObjC::Id) : Int64
+      LibObjCHelpers.ca_player_node_position_samples(node)
     end
 
     # AVAudioFile: open for reading

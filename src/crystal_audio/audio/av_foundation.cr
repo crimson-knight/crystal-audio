@@ -148,6 +148,11 @@ module CrystalAudio
       time = ObjC.send(@ptr, "lastRenderTime")
       time.null? ? nil : time
     end
+
+    # Current playback position in sample frames; -1 before rendering starts.
+    def position_samples : Int64
+      ObjC.player_node_position_samples(@ptr)
+    end
   end
 
   # Wrapper around AVAudioFile for reading audio files.
@@ -175,6 +180,17 @@ module CrystalAudio
     # Read the whole file into a new AVAudioPCMBuffer (for looping playback). nil on error.
     def pcm_buffer : LibObjC::Id?
       ObjC.pcm_buffer_for_file(@ptr)
+    end
+
+    # Sample rate of the file's processing format (Hz).
+    def sample_rate : Float64
+      ObjC.format_sample_rate(processing_format)
+    end
+
+    # Duration in seconds (frames / sample rate). 0.0 if the rate is unknown.
+    def duration_seconds : Float64
+      rate = sample_rate
+      rate > 0.0 ? length.to_f / rate : 0.0
     end
   end
 

@@ -88,5 +88,35 @@ describe CrystalAudio::Player do
       rms_second.should be < 0.01                        # ← one-shot: silent after one play
     end
   end
+
+  describe "position + duration (offline-render verification)" do
+    wav = "/tmp/crystal_audio_pos_test.wav"
+
+    it "reports a track's duration in seconds from its file" do
+      write_sine_wav(wav, 0.1)
+      player = CrystalAudio::Player.new
+      player.add_track(wav, 1.0_f32)
+      player.duration_seconds(0).should be_close(0.1, 0.02)
+    end
+
+    it "advances a track's playback position as the engine renders" do
+      write_sine_wav(wav, 0.5)
+      file = CrystalAudio::AVAudioFile.new(wav)
+      fmt = file.processing_format
+      rate = file.sample_rate
+      render_frames = (rate * 0.2).to_u32                 # render 0.2s
+
+      player = CrystalAudio::Player.new
+      player.add_track(wav, 1.0_f32)
+      player.position_seconds(0).should eq(0.0)           # nothing rendered yet
+
+      player.enable_offline_rendering(fmt, render_frames).should be_true
+      out_buf = CrystalAudio::ObjC.pcm_buffer_create(player.manual_rendering_format, render_frames).not_nil!
+      player.play
+      player.render_offline(render_frames, out_buf)
+
+      player.position_seconds(0).should be_close(0.2, 0.05)  # ~0.2s elapsed
+    end
+  end
 end
 {% end %}

@@ -290,3 +290,24 @@ double ca_pcm_buffer_rms(ca_id buffer, uint32_t start_frame, uint32_t count) {
     for (uint32_t i = start_frame; i < end; i++) { double s = (double)data[i]; sum += s * s; n++; }
     return n ? sqrt(sum / (double)n) : 0.0;
 }
+
+// ── Playback position / duration (progress bar + countdown) ──────────────────
+
+// AVAudioFormat.sampleRate (Hz). 0.0 on error.
+double ca_format_sample_rate(ca_id format) {
+    if (!format) return 0.0;
+    return ((double (*)(ca_id, SEL))objc_msgSend)(format, sel_registerName("sampleRate"));
+}
+
+// Current playback position of an AVAudioPlayerNode in sample frames:
+// [node playerTimeForNodeTime:[node lastRenderTime]].sampleTime. Returns -1 if
+// the node hasn't started rendering yet (lastRenderTime / playerTime nil).
+int64_t ca_player_node_position_samples(ca_id node) {
+    if (!node) return -1;
+    ca_id lrt = ((ca_id (*)(ca_id, SEL))objc_msgSend)(node, sel_registerName("lastRenderTime"));
+    if (!lrt) return -1;
+    ca_id pt = ((ca_id (*)(ca_id, SEL, ca_id))objc_msgSend)(
+        node, sel_registerName("playerTimeForNodeTime:"), lrt);
+    if (!pt) return -1;
+    return ((int64_t (*)(ca_id, SEL))objc_msgSend)(pt, sel_registerName("sampleTime"));
+}
