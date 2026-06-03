@@ -92,14 +92,16 @@ module CrystalAudio
     @engine  : AudioEngine
     @mixer   : AudioMixerNode
     @tracks  : Array(Track)
+    @loop_buffers : Hash(Int32, LibObjC::Id)
 
     struct Track
       getter path    : String
       getter node    : AudioPlayerNode
       getter file    : AVAudioFile
       getter volume  : Float32
+      getter? loop   : Bool
 
-      def initialize(@path, @node, @file, @volume = 1.0_f32)
+      def initialize(@path, @node, @file, @volume = 1.0_f32, @loop = false)
       end
     end
 
@@ -109,10 +111,15 @@ module CrystalAudio
       @tracks = Array(Track).new(MAX_TRACKS)
       @master_volume = 1.0_f32
       @playing = false
+      # Looping tracks schedule an AVAudioPCMBuffer (scheduleBuffer .loops);
+      # keep a reference per track index so the buffer outlives the schedule.
+      @loop_buffers = {} of Int32 => LibObjC::Id
     end
 
-    # Add a track. Returns the track index.
-    def add_track(path : String, volume : Float32 = 1.0_f32) : Int32
+    # Add a track. `loop: true` makes the track repeat indefinitely (e.g.
+    # background music / binaural beats); one-shot tracks (affirmations) play
+    # through once. Returns the track index.
+    def add_track(path : String, volume : Float32 = 1.0_f32, loop : Bool = false) : Int32
       raise "Maximum #{MAX_TRACKS} tracks" if @tracks.size >= MAX_TRACKS
       raise "File not found: #{path}" unless File.exists?(path)
 
@@ -124,7 +131,7 @@ module CrystalAudio
       @engine.attach(node.ptr)
       @engine.connect(node.ptr, @engine.main_mixer_node, format)
 
-      @tracks << Track.new(path, node, file, volume)
+      @tracks << Track.new(path, node, file, volume, loop)
       @tracks.size - 1
     end
 
@@ -145,15 +152,45 @@ module CrystalAudio
       @mixer.output_volume = @master_volume
     end
 
+    # ── Offline (manual) rendering — deterministic, no audio device ───────────
+    # Used to machine-verify playback (e.g. that a looping track actually
+    # repeats). Call BEFORE `play`, while the engine is stopped. `format` is the
+    # render format (pass a track's `processing_format`); `max_frames` caps a
+    # single render call.
+    def enable_offline_rendering(format : LibObjC::Id, max_frames : UInt32) : Bool
+      @engine.enable_manual_rendering(format, max_frames)
+    end
+
+    # The format the engine renders in after `enable_offline_rendering`.
+    def manual_rendering_format : LibObjC::Id
+      @engine.manual_rendering_format
+    end
+
+    # Render up to `frames` frames into `out_buffer` (status 0 = Success);
+    # `out_buffer.frameLength` is set to the count produced.
+    def render_offline(frames : UInt32, out_buffer : LibObjC::Id) : Int64
+      @engine.render_offline(frames, out_buffer)
+    end
+
     # Start playback. Schedules files on all player nodes, starts the engine,
     # then issues a synchronized play_at_time on all nodes.
     def play
       return if @playing
       raise "No tracks added" if @tracks.empty?
 
-      # Schedule each file on its player node
-      @tracks.each do |track|
-        track.node.schedule_file(track.file.ptr)
+      # Schedule each track. Looping tracks (music/beats) schedule a PCM buffer
+      # with .loops so they repeat; one-shot tracks schedule the file once.
+      @tracks.each_with_index do |track, i|
+        if track.loop?
+          if buffer = ObjC.pcm_buffer_for_file(track.file.ptr)
+            @loop_buffers[i] = buffer
+            track.node.schedule_buffer_looping(buffer)
+          else
+            track.node.schedule_file(track.file.ptr) # fallback: play once if buffer fails
+          end
+        else
+          track.node.schedule_file(track.file.ptr)
+        end
       end
 
       # Start the engine

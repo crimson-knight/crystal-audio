@@ -79,6 +79,20 @@ lib LibObjCHelpers
 
   # [[ClassName alloc] init]
   fun ca_alloc_init(class_name : LibC::Char*) : Void*
+
+  # ── Looping playback (scheduleBuffer:options:.loops) ────────────────────────
+  fun ca_pcm_buffer_for_file(file : Void*) : Void*
+  fun ca_pcm_buffer_create(format : Void*, frame_capacity : UInt32) : Void*
+  fun ca_schedule_buffer_loops(player : Void*, buffer : Void*)
+
+  # ── Offline (manual) rendering — deterministic, no audio device ─────────────
+  fun ca_engine_enable_manual_rendering(engine : Void*, format : Void*, max_frames : UInt32) : Bool
+  fun ca_engine_manual_rendering_format(engine : Void*) : Void*
+  fun ca_engine_render_offline(engine : Void*, frames : UInt32, out_buffer : Void*) : Int64
+
+  # ── PCM buffer inspection (verification) ────────────────────────────────────
+  fun ca_pcm_buffer_frame_length(buffer : Void*) : UInt32
+  fun ca_pcm_buffer_rms(buffer : Void*, start_frame : UInt32, count : UInt32) : Float64
 end
 
 module CrystalAudio
@@ -182,6 +196,51 @@ module CrystalAudio
     # scheduleFile:atTime:completionHandler: (with time, handler = nil)
     def self.schedule_file_at_time(player : LibObjC::Id, file : LibObjC::Id, time : LibObjC::Id)
       LibObjCHelpers.ca_msg_void_id_id_nil(player, sel("scheduleFile:atTime:completionHandler:"), file, time)
+    end
+
+    # ── Looping playback ──────────────────────────────────────────────────────
+
+    # Read an AVAudioFile fully into a new AVAudioPCMBuffer. nil on error.
+    def self.pcm_buffer_for_file(file : LibObjC::Id) : LibObjC::Id?
+      buf = LibObjCHelpers.ca_pcm_buffer_for_file(file)
+      buf.null? ? nil : buf
+    end
+
+    # Allocate an empty AVAudioPCMBuffer (offline-render destination). nil on error.
+    def self.pcm_buffer_create(format : LibObjC::Id, frame_capacity : UInt32) : LibObjC::Id?
+      buf = LibObjCHelpers.ca_pcm_buffer_create(format, frame_capacity)
+      buf.null? ? nil : buf
+    end
+
+    # scheduleBuffer:atTime:options:completionHandler: with .loops — loops until stop.
+    def self.schedule_buffer_loops(player : LibObjC::Id, buffer : LibObjC::Id)
+      LibObjCHelpers.ca_schedule_buffer_loops(player, buffer)
+    end
+
+    # ── Offline (manual) rendering ────────────────────────────────────────────
+
+    def self.engine_enable_manual_rendering(engine : LibObjC::Id, format : LibObjC::Id, max_frames : UInt32) : Bool
+      LibObjCHelpers.ca_engine_enable_manual_rendering(engine, format, max_frames)
+    end
+
+    def self.engine_manual_rendering_format(engine : LibObjC::Id) : LibObjC::Id
+      LibObjCHelpers.ca_engine_manual_rendering_format(engine)
+    end
+
+    # renderOffline:toBuffer:error: → status (0 = Success).
+    def self.engine_render_offline(engine : LibObjC::Id, frames : UInt32, out_buffer : LibObjC::Id) : Int64
+      LibObjCHelpers.ca_engine_render_offline(engine, frames, out_buffer)
+    end
+
+    # ── PCM buffer inspection ─────────────────────────────────────────────────
+
+    def self.pcm_buffer_frame_length(buffer : LibObjC::Id) : UInt32
+      LibObjCHelpers.ca_pcm_buffer_frame_length(buffer)
+    end
+
+    # RMS amplitude of channel 0 over [start_frame, start_frame+count).
+    def self.pcm_buffer_rms(buffer : LibObjC::Id, start_frame : UInt32, count : UInt32) : Float64
+      LibObjCHelpers.ca_pcm_buffer_rms(buffer, start_frame, count)
     end
 
     # AVAudioFile: open for reading

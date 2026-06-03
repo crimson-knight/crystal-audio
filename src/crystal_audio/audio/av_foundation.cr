@@ -68,6 +68,24 @@ module CrystalAudio
     def running? : Bool
       ObjC.send_bool(@ptr, "isRunning")
     end
+
+    # ── Offline (manual) rendering ────────────────────────────────────────────
+    # Switch the engine to deterministic offline rendering (no audio device).
+    # Call while the engine is stopped, BEFORE start. Returns true on success.
+    def enable_manual_rendering(format : LibObjC::Id, max_frames : UInt32) : Bool
+      ObjC.engine_enable_manual_rendering(@ptr, format, max_frames)
+    end
+
+    # The PCM format the engine renders in manual mode (set by enable_manual_rendering).
+    def manual_rendering_format : LibObjC::Id
+      ObjC.engine_manual_rendering_format(@ptr)
+    end
+
+    # Render up to `frames` frames into out_buffer. Returns the status (0 = Success);
+    # out_buffer.frameLength is set to the number of frames actually produced.
+    def render_offline(frames : UInt32, out_buffer : LibObjC::Id) : Int64
+      ObjC.engine_render_offline(@ptr, frames, out_buffer)
+    end
   end
 
   # Wrapper around AVAudioPlayerNode for multi-track playback.
@@ -114,6 +132,12 @@ module CrystalAudio
       ObjC.schedule_file_at_time(@ptr, file, time)
     end
 
+    # Schedule a PCM buffer that loops indefinitely until the node is stopped
+    # (scheduleBuffer:options:AVAudioPlayerNodeBufferLoops).
+    def schedule_buffer_looping(buffer : LibObjC::Id)
+      ObjC.schedule_buffer_loops(@ptr, buffer)
+    end
+
     # Play starting at a specific AVAudioTime (for synchronized multi-track start).
     def play_at_time(time : LibObjC::Id)
       LibObjCHelpers.ca_msg_void_id(@ptr, LibObjC.sel_registerName("playAtTime:"), time)
@@ -146,6 +170,11 @@ module CrystalAudio
     # File length in sample frames.
     def length : Int64
       ObjC.send_i64(@ptr, "length")
+    end
+
+    # Read the whole file into a new AVAudioPCMBuffer (for looping playback). nil on error.
+    def pcm_buffer : LibObjC::Id?
+      ObjC.pcm_buffer_for_file(@ptr)
     end
   end
 

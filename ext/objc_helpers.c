@@ -11,6 +11,7 @@
 #include <objc/message.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <math.h>
 
 // Use ca_id to avoid clash with POSIX id_t (unsigned int)
 typedef void*    ca_id;
@@ -184,4 +185,108 @@ ca_id ca_alloc_init(const char *class_name) {
     ca_id obj = ((ca_id (*)(Class, SEL))objc_msgSend)(cls, sel_registerName("alloc"));
     if (!obj) return NULL;
     return ((ca_id (*)(ca_id, SEL))objc_msgSend)(obj, sel_registerName("init"));
+}
+
+// ── Looping playback: AVAudioFile -> AVAudioPCMBuffer + scheduleBuffer .loops ─
+// Compiled WITHOUT -fobjc-arc (this is a .c file): alloc returns +1 (owned), so
+// the buffer persists until released. We intentionally keep it alive for the
+// player's lifetime (a scheduled looping buffer must outlive the schedule).
+
+// Read an entire AVAudioFile into a freshly-allocated AVAudioPCMBuffer sized to
+// the file (using its processingFormat). Returns the buffer, or NULL on error.
+ca_id ca_pcm_buffer_for_file(ca_id file) {
+    if (!file) return NULL;
+    ca_id fmt = ((ca_id (*)(ca_id, SEL))objc_msgSend)(file, sel_registerName("processingFormat"));
+    if (!fmt) return NULL;
+    int64_t length = ((int64_t (*)(ca_id, SEL))objc_msgSend)(file, sel_registerName("length"));
+    if (length <= 0) return NULL;
+    Class cls = objc_getClass("AVAudioPCMBuffer");
+    if (!cls) return NULL;
+    ca_id buf = ((ca_id (*)(Class, SEL))objc_msgSend)(cls, sel_registerName("alloc"));
+    if (!buf) return NULL;
+    buf = ((ca_id (*)(ca_id, SEL, ca_id, uint32_t))objc_msgSend)(
+        buf, sel_registerName("initWithPCMFormat:frameCapacity:"), fmt, (uint32_t)length);
+    if (!buf) return NULL;
+    ca_id err = NULL;
+    bool ok = ((bool (*)(ca_id, SEL, ca_id, ca_id*))objc_msgSend)(
+        file, sel_registerName("readIntoBuffer:error:"), buf, &err);
+    return ok ? buf : NULL;
+}
+
+// Allocate an empty AVAudioPCMBuffer with the given format + capacity (the
+// destination for offline manual rendering). Returns NULL on error.
+ca_id ca_pcm_buffer_create(ca_id format, uint32_t frame_capacity) {
+    if (!format) return NULL;
+    Class cls = objc_getClass("AVAudioPCMBuffer");
+    if (!cls) return NULL;
+    ca_id buf = ((ca_id (*)(Class, SEL))objc_msgSend)(cls, sel_registerName("alloc"));
+    if (!buf) return NULL;
+    return ((ca_id (*)(ca_id, SEL, ca_id, uint32_t))objc_msgSend)(
+        buf, sel_registerName("initWithPCMFormat:frameCapacity:"), format, frame_capacity);
+}
+
+// scheduleBuffer:atTime:options:completionHandler: with options =
+// AVAudioPlayerNodeBufferLoops (1 << 0). atTime + handler = nil. The buffer
+// loops indefinitely until the node is stopped.
+void ca_schedule_buffer_loops(ca_id player, ca_id buffer) {
+    ((void (*)(ca_id, SEL, ca_id, ca_id, uint64_t, ca_id))objc_msgSend)(
+        player, sel_registerName("scheduleBuffer:atTime:options:completionHandler:"),
+        buffer, NULL, (uint64_t)1 /* AVAudioPlayerNodeBufferLoops */, NULL);
+}
+
+// ── Offline (manual) rendering — deterministic, no audio device required ─────
+
+// enableManualRenderingMode:format:maximumFrameCount:error: with mode =
+// AVAudioEngineManualRenderingModeOffline (0). Must be called while the engine
+// is stopped, before start. Returns true on success.
+bool ca_engine_enable_manual_rendering(ca_id engine, ca_id format, uint32_t max_frames) {
+    if (!engine || !format) return false;
+    ca_id err = NULL;
+    return ((bool (*)(ca_id, SEL, long, ca_id, uint32_t, ca_id*))objc_msgSend)(
+        engine, sel_registerName("enableManualRenderingMode:format:maximumFrameCount:error:"),
+        (long)0 /* Offline */, format, max_frames, &err);
+}
+
+// engine.manualRenderingFormat (AVAudioFormat*)
+ca_id ca_engine_manual_rendering_format(ca_id engine) {
+    if (!engine) return NULL;
+    return ((ca_id (*)(ca_id, SEL))objc_msgSend)(engine, sel_registerName("manualRenderingFormat"));
+}
+
+// renderOffline:toBuffer:error: -> AVAudioEngineManualRenderingStatus (NSInteger;
+// 0 = Success). Renders up to `frames` frames into out_buffer, whose frameLength
+// is set to the count actually produced.
+int64_t ca_engine_render_offline(ca_id engine, uint32_t frames, ca_id out_buffer) {
+    if (!engine || !out_buffer) return -100;
+    ca_id err = NULL;
+    return ((long (*)(ca_id, SEL, uint32_t, ca_id, ca_id*))objc_msgSend)(
+        engine, sel_registerName("renderOffline:toBuffer:error:"), frames, out_buffer, &err);
+}
+
+// ── PCM buffer inspection (verification) ─────────────────────────────────────
+
+// AVAudioPCMBuffer.frameLength (AVAudioFrameCount = UInt32)
+uint32_t ca_pcm_buffer_frame_length(ca_id buffer) {
+    if (!buffer) return 0;
+    return ((uint32_t (*)(ca_id, SEL))objc_msgSend)(buffer, sel_registerName("frameLength"));
+}
+
+// RMS amplitude of channel 0 over [start_frame, start_frame+count), reading
+// buffer.floatChannelData[0]. Returns -1.0 if the buffer has no float data.
+// Used to assert that a looped track keeps producing audio past its single-play
+// length (a non-looping track is silent there).
+double ca_pcm_buffer_rms(ca_id buffer, uint32_t start_frame, uint32_t count) {
+    if (!buffer) return -1.0;
+    float * const *chans = ((float * const * (*)(ca_id, SEL))objc_msgSend)(
+        buffer, sel_registerName("floatChannelData"));
+    if (!chans) return -1.0;
+    uint32_t flen = ((uint32_t (*)(ca_id, SEL))objc_msgSend)(buffer, sel_registerName("frameLength"));
+    if (start_frame >= flen) return 0.0;
+    uint32_t end = start_frame + count;
+    if (end > flen) end = flen;
+    const float *data = chans[0];
+    double sum = 0.0;
+    uint32_t n = 0;
+    for (uint32_t i = start_frame; i < end; i++) { double s = (double)data[i]; sum += s * s; n++; }
+    return n ? sqrt(sum / (double)n) : 0.0;
 }
