@@ -149,6 +149,25 @@ void ca_msg_void_id_id_nil(ca_id obj, ca_sel sel, ca_id a1, ca_id a2) {
     ((void (*)(ca_id, ca_sel, ca_id, ca_id, ca_id))objc_msgSend)(obj, sel, a1, a2, NULL);
 }
 
+// ── scheduleFile:atTime:completionCallbackType:completionHandler: ───────────
+//
+// Schedules a file (atTime = nil → play immediately on the node's clock) and
+// installs `block` as the completion handler, firing when the chosen callback
+// type occurs. callback_type maps to AVAudioPlayerNodeCompletionCallbackType:
+//   0 = AVAudioPlayerNodeCompletionDataConsumed   (data handed to the renderer)
+//   1 = AVAudioPlayerNodeCompletionDataRendered    (data rendered, not yet heard)
+//   2 = AVAudioPlayerNodeCompletionDataPlayedBack  (data actually played to the
+//                                                    output / "heard")
+// The crystal-audio Player uses DataPlayedBack so completion means the file
+// genuinely reached the speakers. The block (built by block_bridge.c) hops to
+// the main queue before calling Crystal.
+void ca_schedule_file_with_completion(ca_id node, ca_id file,
+                                      uint64_t callback_type, ca_id block) {
+    ((void (*)(ca_id, SEL, ca_id, ca_id, uint64_t, ca_id))objc_msgSend)(
+        node, sel_registerName("scheduleFile:atTime:completionCallbackType:completionHandler:"),
+        file, NULL, callback_type, block);
+}
+
 // ── NSDictionary / NSNumber helpers (for NowPlayingInfo) ────────────────────
 
 // Create NSDictionary from parallel C arrays of keys and values

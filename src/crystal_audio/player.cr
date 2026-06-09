@@ -21,6 +21,13 @@ module CrystalAudio
       @backend.add_track(path, volume)
     end
 
+    # Per-track completion callback. No-op on Android for now (the AAudio backend
+    # does not yet surface per-track end-of-file); present so consumer code that
+    # registers a completion handler compiles cross-platform.
+    def on_track_finished(&block : Int32 -> Nil)
+      # AAudioPlayer does not report per-track completion yet; intentionally a no-op.
+    end
+
     def volume(track index : Int32, level : Float32)
       @backend.volume(track: index, level: level)
     end
@@ -114,6 +121,35 @@ module CrystalAudio
       # Looping tracks schedule an AVAudioPCMBuffer (scheduleBuffer .loops);
       # keep a reference per track index so the buffer outlives the schedule.
       @loop_buffers = {} of Int32 => LibObjC::Id
+      # Set true around stop/pause/remove_track so the completion handler can
+      # tell a genuine end-of-file from an explicit teardown (AVAudioPlayerNode
+      # fires the handler on stop too).
+      @stopping = false
+      # GC roots for the per-track completion callbacks (boxed Procs). Without a
+      # live reference the GC would collect them and the native completion
+      # handler would call into freed memory.
+      @completion_boxes = [] of Pointer(Void)
+    end
+
+    # AVAudioPlayerNodeCompletionCallbackType the completion handler fires on.
+    # Defaults to DataPlayedBack: fires when the audio is genuinely heard at the
+    # output, and (importantly) does NOT fire on stop — the correct signal for a
+    # real-device playlist. NOTE: DataPlayedBack does NOT fire under offline
+    # manual rendering (nothing is "played back" to a device); tests that verify
+    # the callback via offline render set this to DataRendered, which fires when
+    # the file's data is fully rendered. See ObjC::PLAYER_COMPLETION_* constants.
+    property completion_callback_type : UInt64 = ObjC::PLAYER_COMPLETION_DATA_PLAYED_BACK
+
+    # Register a single player-level callback fired when a (non-looping) track
+    # plays to its natural end. Receives the finished track's index, so the
+    # consumer can advance a playlist — including while the device is locked /
+    # app backgrounded (this is driven by the audio engine, not a UI timer).
+    #
+    # Does NOT fire for looping tracks, nor on explicit stop / pause /
+    # remove_track. The native handler runs on an arbitrary audio thread; the
+    # C bridge hops to the main queue before this Crystal proc is invoked.
+    def on_track_finished(&block : Int32 -> Nil)
+      @on_track_finished = block
     end
 
     # Add a track. `loop: true` makes the track repeat indefinitely (e.g.
@@ -138,6 +174,9 @@ module CrystalAudio
     def remove_track(index : Int32)
       raise IndexError.new("Invalid track index: #{index}") unless @tracks[index]?
       track = @tracks.delete_at(index)
+      # Suppress the completion handler: stopping the node fires it, but this is
+      # an explicit removal, not a natural end-of-file.
+      @stopping = true
       track.node.stop
       ObjC.detach(@engine.ptr, track.node.ptr)
     end
@@ -197,18 +236,22 @@ module CrystalAudio
       return if @playing
       raise "No tracks added" if @tracks.empty?
 
+      @stopping = false
+
       # Schedule each track. Looping tracks (music/beats) schedule a PCM buffer
       # with .loops so they repeat; one-shot tracks schedule the file once.
+      # One-shot tracks register a completion handler so the consumer learns
+      # when the track plays to its end (looping tracks never finish).
       @tracks.each_with_index do |track, i|
         if track.loop?
           if buffer = ObjC.pcm_buffer_for_file(track.file.ptr)
             @loop_buffers[i] = buffer
             track.node.schedule_buffer_looping(buffer)
           else
-            track.node.schedule_file(track.file.ptr) # fallback: play once if buffer fails
+            schedule_with_completion(track, i) # fallback: play once if buffer fails
           end
         else
-          track.node.schedule_file(track.file.ptr)
+          schedule_with_completion(track, i)
         end
       end
 
@@ -245,6 +288,9 @@ module CrystalAudio
     # Pause all nodes (keeps engine running for quick resume).
     def pause
       return unless @playing
+      # Pausing does not fire the DataPlayedBack completion (the data hasn't
+      # finished playing), but set the guard defensively in case a node stops.
+      @stopping = true
       @tracks.each(&.node.pause)
       @playing = false
     end
@@ -254,15 +300,24 @@ module CrystalAudio
       return if @playing
       return if @tracks.empty?
 
-      # Re-schedule and play (AVAudioPlayerNode requires re-scheduling after stop/pause)
-      @tracks.each do |track|
-        track.node.schedule_file(track.file.ptr)
+      @stopping = false
+
+      # Re-schedule and play (AVAudioPlayerNode requires re-scheduling after stop/pause).
+      # Re-attach completion handlers so a resumed one-shot still reports its end.
+      @tracks.each_with_index do |track, i|
+        if track.loop?
+          track.node.schedule_file(track.file.ptr)
+        else
+          schedule_with_completion(track, i)
+        end
         track.node.play
       end
       @playing = true
     end
 
     def stop
+      # Explicit stop: the completion handler fires on stop too, so guard it.
+      @stopping = true
       @tracks.each(&.node.stop)
       @engine.stop
       @playing = false
@@ -301,6 +356,39 @@ module CrystalAudio
       rc
     end
 
+    # Schedule a one-shot file on its node with a DataPlayedBack completion
+    # handler that calls back into this player with the track index. The boxed
+    # callback is rooted in @completion_boxes so the GC keeps it alive for as
+    # long as the native node may invoke it.
+    private def schedule_with_completion(track : Track, index : Int32)
+      # Capture self + index in a non-escaping Crystal proc, then box it as the
+      # opaque ctx the C trampoline forwards back. (callback_type unused here —
+      # we only register the DataPlayedBack type, so any fire is end-of-file.)
+      player = self
+      callback = ->(_callback_type : UInt64) { player.handle_track_finished(index) }
+      box = Box.box(callback)
+      @completion_boxes << box
+
+      # Non-closure trampoline: everything it needs arrives via ctx.
+      trampoline = LibBlockBridge::PlayerCompletionFn.new do |ctx, callback_type|
+        cb = Box(Proc(UInt64, Nil)).unbox(ctx)
+        cb.call(callback_type)
+      end
+
+      block = LibBlockBridge.crystal_player_completion_block_create(trampoline, box)
+      track.node.schedule_file_with_completion(track.file.ptr, block, @completion_callback_type)
+      LibBlockBridge.crystal_block_release(block)
+    end
+
+    # Called (on the main queue, via the C bridge's dispatch_async) when a track
+    # node's DataPlayedBack completion fires. Suppressed during explicit
+    # stop/pause/remove_track so completion only signals a genuine end-of-file.
+    protected def handle_track_finished(index : Int32)
+      return if @stopping
+      @playing = false if @tracks.size == 1
+      @on_track_finished.try(&.call(index))
+    end
+
     private def update_now_playing_state
       np = @now_playing
       return unless np
@@ -319,6 +407,10 @@ module CrystalAudio
     @now_playing_artist : String?
     @now_playing_duration : Float64?
     @remote_commands : RemoteCommandCenter?
+
+    @stopping : Bool
+    @completion_boxes : Array(Pointer(Void))
+    @on_track_finished : Proc(Int32, Nil)?
   end
 end
 

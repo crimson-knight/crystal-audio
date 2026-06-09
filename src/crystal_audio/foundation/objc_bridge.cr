@@ -72,6 +72,9 @@ lib LibObjCHelpers
   # scheduleFile:atTime:completionHandler: with time (handler = nil)
   fun ca_msg_void_id_id_nil(obj : Void*, sel : Void*, a1 : Void*, a2 : Void*)
 
+  # scheduleFile:atTime:completionCallbackType:completionHandler:
+  fun ca_schedule_file_with_completion(node : Void*, file : Void*, callback_type : UInt64, block : Void*)
+
   # NSDictionary / NSNumber helpers
   fun ca_nsdictionary_create(keys : Void**, values : Void**, count : UInt32) : Void*
   fun ca_nsnumber_double(value : Float64) : Void*
@@ -200,6 +203,22 @@ module CrystalAudio
     # scheduleFile:atTime:completionHandler: (with time, handler = nil)
     def self.schedule_file_at_time(player : LibObjC::Id, file : LibObjC::Id, time : LibObjC::Id)
       LibObjCHelpers.ca_msg_void_id_id_nil(player, sel("scheduleFile:atTime:completionHandler:"), file, time)
+    end
+
+    # AVAudioPlayerNodeCompletionCallbackType values.
+    #   DataConsumed   (0): data handed off to the renderer.
+    #   DataRendered   (1): data fully rendered (fires under offline rendering).
+    #   DataPlayedBack (2): data actually heard at the output; does NOT fire on
+    #                       stop, and does NOT fire under offline manual rendering.
+    PLAYER_COMPLETION_DATA_CONSUMED    = 0_u64
+    PLAYER_COMPLETION_DATA_RENDERED    = 1_u64
+    PLAYER_COMPLETION_DATA_PLAYED_BACK = 2_u64
+
+    # scheduleFile:atTime:completionCallbackType:completionHandler: (atTime = nil).
+    # `block` is an ObjC completion block built by LibBlockBridge; it must be
+    # retained by the node (it is) and released by the caller after scheduling.
+    def self.schedule_file_with_completion(player : LibObjC::Id, file : LibObjC::Id, callback_type : UInt64, block : LibObjC::Id)
+      LibObjCHelpers.ca_schedule_file_with_completion(player, file, callback_type, block)
     end
 
     # ── Looping playback ──────────────────────────────────────────────────────

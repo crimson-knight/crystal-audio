@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <Block.h>
+#include <dispatch/dispatch.h>
 
 /* -------------------------------------------------------------------------
  * Block ABI structures
@@ -257,7 +258,94 @@ void *crystal_mp_handler_block_create(long (*fn)(void *ctx, void *event),
 }
 
 /* =========================================================================
- * 4. crystal_block_release
+ * 4. AVAudioPlayerNode completion handler  —  void (^)(AVAudioPlayerNodeCompletionCallbackType)
+ *
+ * Used by:
+ *   -scheduleFile:atTime:completionCallbackType:completionHandler:
+ * The block receives one NSUInteger argument (the callback type that fired).
+ *
+ * ObjC type encoding:
+ *   v  = void return
+ *   16 = total arg bytes (8 block-self + 8 NSUInteger)
+ *   @?0 = block at offset 0
+ *   Q8  = unsigned long long (NSUInteger) at offset 8
+ *
+ * CRITICAL THREADING: AVAudioPlayerNode fires completion handlers on an
+ * arbitrary internal audio/dispatch thread. The consumer embeds Crystal in a
+ * Swift app where Crystal has NO scheduler/event loop on foreign threads, so
+ * calling a Crystal Proc from such a thread corrupts/crashes. We therefore hop
+ * to the main queue (dispatch_async onto dispatch_get_main_queue) BEFORE
+ * invoking the Crystal trampoline. The captured {fn, ctx} are copied into a
+ * heap struct that the dispatched block owns and frees after the call.
+ * ====================================================================== */
+DEFINE_BLOCK_TYPE(PlayerCompletion, void, unsigned long long callback_type)
+
+static struct {
+    struct Block_descriptor_1 d1;
+    struct Block_descriptor_3 d3;
+} player_completion_desc = {
+    .d1 = { .reserved = 0, .size = sizeof(PlayerCompletion_block_t) },
+    .d3 = { .layout   = NULL, .signature = "v16@?0Q8" },
+};
+
+/* Payload handed to the main-queue block: the Crystal callback + its context
+ * plus the callback type that fired. Heap-allocated per completion so it
+ * outlives the (asynchronous) main-queue hop; freed inside the hop. */
+typedef struct {
+    PlayerCompletion_fn_t fn;
+    void                 *ctx;
+    unsigned long long    callback_type;
+} PlayerCompletion_payload_t;
+
+/* The trampoline the audio thread calls. It does NOT touch Crystal directly;
+ * it packages the call and dispatches it to the main queue. */
+static void player_completion_invoke(PlayerCompletion_block_t *blk,
+                                     unsigned long long callback_type) {
+    PlayerCompletion_payload_t *payload =
+        (PlayerCompletion_payload_t *)malloc(sizeof(PlayerCompletion_payload_t));
+    if (!payload) return;
+    payload->fn            = blk->capture.fn;
+    payload->ctx           = blk->capture.ctx;
+    payload->callback_type = callback_type;
+
+    /* Hop to the main queue: Crystal is only safe to call on the main thread
+     * (the thread that owns its runtime/scheduler in the embedded host). */
+    dispatch_async(dispatch_get_main_queue(), ^{
+        payload->fn(payload->ctx, payload->callback_type);
+        free(payload);
+    });
+}
+
+/*
+ * crystal_player_completion_block_create
+ *
+ * fn  — Crystal proc compiled to a C function:
+ *          void fn(void *ctx, unsigned long long callbackType)
+ *       Invoked ON THE MAIN QUEUE (safe to call into Crystal).
+ * ctx — opaque pointer forwarded to fn unchanged (a Box'd Crystal Proc).
+ *
+ * Pass the returned block to
+ *   -scheduleFile:atTime:completionCallbackType:completionHandler:
+ * Release with crystal_block_release() after scheduling returns; the player
+ * node retains its own copy.
+ */
+void *crystal_player_completion_block_create(
+        void (*fn)(void *ctx, unsigned long long callback_type),
+        void *ctx)
+{
+    PlayerCompletion_block_t tmp;
+    tmp.isa        = _NSConcreteStackBlock;
+    tmp.flags      = BLOCK_HAS_SIGNATURE;
+    tmp.reserved   = 0;
+    tmp.invoke     = (void *)player_completion_invoke;
+    tmp.descriptor = &player_completion_desc.d1;
+    tmp.capture.fn  = (PlayerCompletion_fn_t)fn;
+    tmp.capture.ctx = ctx;
+    return _Block_copy(&tmp);
+}
+
+/* =========================================================================
+ * 5. crystal_block_release
  *
  * Releases the heap block returned by any factory above.  Call this after
  * passing the block to the ObjC API; the API retains its own reference so

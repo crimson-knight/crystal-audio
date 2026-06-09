@@ -132,6 +132,14 @@ module CrystalAudio
       ObjC.schedule_file_at_time(@ptr, file, time)
     end
 
+    # Schedule a file with a completion handler. `block` is an ObjC completion
+    # block (built via LibBlockBridge) invoked when `callback_type` occurs;
+    # use ObjC::PLAYER_COMPLETION_DATA_PLAYED_BACK so it fires when the audio is
+    # actually heard at the output (genuine end-of-file), not just rendered.
+    def schedule_file_with_completion(file : LibObjC::Id, block : LibObjC::Id, callback_type : UInt64 = ObjC::PLAYER_COMPLETION_DATA_PLAYED_BACK)
+      ObjC.schedule_file_with_completion(@ptr, file, callback_type, block)
+    end
+
     # Schedule a PCM buffer that loops indefinitely until the node is stopped
     # (scheduleBuffer:options:AVAudioPlayerNodeBufferLoops).
     def schedule_buffer_looping(buffer : LibObjC::Id)

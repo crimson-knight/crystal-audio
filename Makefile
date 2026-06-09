@@ -27,7 +27,7 @@ EXT_SYSTEM_AUDIO_TAP := ext/system_audio_tap.o
 EXT_APPKIT_HELPERS   := ext/appkit_helpers.o
 EXT_AUDIO_WRITE      := ext/audio_write_helper.o
 
-.PHONY: all ext sample spec clean macos-app ios-ext ios-lib ios-app playback-test lockscreen-test android-lib android-app
+.PHONY: all ext sample spec clean macos-app ios-ext ios-lib ios-app playback-test completion-test lockscreen-test android-lib android-app
 
 all: ext
 
@@ -96,6 +96,15 @@ playback-test: ext
 	@echo "  Built samples/playback_test/playback_test"
 	@echo "  Running playback test ..."
 	samples/playback_test/playback_test
+
+## Build and run completion-callback test (realtime, DataPlayedBack)
+completion-test: ext
+	crystal build samples/completion_test/main.cr \
+	  -o samples/completion_test/completion_test \
+	  --link-flags="$(LINK_FLAGS)"
+	@echo "  Built samples/completion_test/completion_test"
+	@echo "  Running completion callback test ..."
+	samples/completion_test/completion_test
 
 ## Build and run lock screen controls test
 lockscreen-test: ext

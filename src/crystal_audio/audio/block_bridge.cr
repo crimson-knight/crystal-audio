@@ -40,6 +40,17 @@ lib LibBlockBridge
 
   fun crystal_mp_handler_block_create(fn : MpHandlerFn, ctx : Void*) : Void*
 
+  # ── AVAudioPlayerNode completion handler ─────────────────────────────────────
+  # void (^)(AVAudioPlayerNodeCompletionCallbackType callbackType)
+  # fn receives: (ctx: Void*, callbackType: UInt64) -> Void
+  #
+  # The C trampoline hops to the MAIN dispatch queue before invoking `fn`, so the
+  # Crystal proc always runs on the main thread (required: Crystal has no
+  # scheduler/event loop on the arbitrary audio thread the handler fires on).
+  alias PlayerCompletionFn = (Void*, UInt64) -> Void
+
+  fun crystal_player_completion_block_create(fn : PlayerCompletionFn, ctx : Void*) : Void*
+
   # ── Lifetime management ──────────────────────────────────────────────────────
   # Release the caller's reference. ObjC APIs retain their own copies;
   # call this immediately after the ObjC install call returns.

@@ -51,6 +51,18 @@ lib LibCoreFoundation
   fun CFRunLoopRun
   fun CFRunLoopStop(rl : CFRunLoopRef)
 
+  # Run the run loop in a given mode for up to `seconds`; returns when a source
+  # is handled (if return_after_source_handled) or the timeout elapses. Used to
+  # service main-queue dispatch_async work (e.g. audio completion callbacks).
+  fun CFRunLoopRunInMode(
+    mode                       : CFStringRef,
+    seconds                    : Float64,
+    return_after_source_handled : Bool
+  ) : Int32
+
+  # The default run loop mode (a CFStringRef global exported by CoreFoundation).
+  $kCFRunLoopDefaultMode : CFStringRef
+
   # ── Memory management ───────────────────────────────────────────────────────
 
   fun CFRelease(cf : CFTypeRef)
@@ -79,6 +91,11 @@ module CrystalAudio
       )
       LibCoreFoundation.CFRelease(cf_str)
       url
+    end
+
+    # The default CFRunLoop mode (kCFRunLoopDefaultMode).
+    def self.default_run_loop_mode : LibCoreFoundation::CFStringRef
+      LibCoreFoundation.kCFRunLoopDefaultMode
     end
   end
 end

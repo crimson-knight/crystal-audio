@@ -8,6 +8,7 @@ lib/
 bin/
 samples/*/record
 samples/*/mic_recorder
+samples/completion_test/completion_test
 samples/**/*.dwarf
 .DS_Store
 
