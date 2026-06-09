@@ -345,7 +345,167 @@ void *crystal_player_completion_block_create(
 }
 
 /* =========================================================================
- * 5. crystal_block_release
+ * 5. MPMediaItemArtwork  —  artwork for the lock screen / Control Center
+ *
+ * MPMediaItemArtwork is built via:
+ *   -[MPMediaItemArtwork initWithBoundsSize:requestHandler:]
+ * The requestHandler is an ObjC BLOCK:  UIImage* (^)(CGSize)  (NSImage* on
+ * macOS).  iOS may call it more than once (e.g. when it wants a different size)
+ * and at an arbitrary later time, so the image the handler returns MUST stay
+ * alive for the artwork's lifetime.  We therefore:
+ *   - load the image once here (imageWithContentsOfFile:),
+ *   - retain it (this file is compiled WITHOUT -fobjc-arc),
+ *   - capture the retained image in the block so every invocation returns it.
+ *
+ * Doing the whole construction in C/ObjC-runtime (no Crystal block bridging)
+ * is the safest path: the captured image and block live entirely on the native
+ * side, decoupled from Crystal's GC.
+ *
+ * ObjC type encoding of the request handler block (returns object, takes CGSize):
+ *   @  = object return (id)
+ *   24 = total arg bytes on ARM64 (8 block-self + 16 CGSize)
+ *   @?0 = block pointer at offset 0
+ *   {CGSize=dd}8 = CGSize (two doubles) at offset 8
+ *
+ * CGSize is { double width; double height; } — passed by value (in FP regs on
+ * ARM64).  We ignore it and always return the full-resolution image.
+ * ====================================================================== */
+#include <objc/runtime.h>
+#include <objc/message.h>
+
+typedef struct { double width; double height; } ca_cgsize;
+
+DEFINE_BLOCK_TYPE(ArtworkRequest, void *, ca_cgsize size)
+
+static struct {
+    struct Block_descriptor_1 d1;
+    struct Block_descriptor_3 d3;
+} artwork_request_desc = {
+    .d1 = { .reserved = 0, .size = sizeof(ArtworkRequest_block_t) },
+    .d3 = { .layout = NULL, .signature = "@24@?0{CGSize=dd}8" },
+};
+
+/* The trampoline iOS/macOS calls each time it needs the image.  ctx holds the
+ * already-loaded, retained image; we just hand it back.  (No Crystal hop: this
+ * is pure native, safe to call on any thread.) */
+static void *artwork_request_invoke(ArtworkRequest_block_t *blk, ca_cgsize size) {
+    (void)size;
+    return blk->capture.ctx; /* the retained UIImage* / NSImage* */
+}
+
+/* Build the request-handler block that always returns `image`. */
+static void *artwork_request_block_create(void *image) {
+    ArtworkRequest_block_t tmp;
+    tmp.isa        = _NSConcreteStackBlock;
+    tmp.flags      = BLOCK_HAS_SIGNATURE;
+    tmp.reserved   = 0;
+    tmp.invoke     = (void *)artwork_request_invoke;
+    tmp.descriptor = &artwork_request_desc.d1;
+    tmp.capture.fn  = (ArtworkRequest_fn_t)artwork_request_invoke; /* unused */
+    tmp.capture.ctx = image;
+    return _Block_copy(&tmp);
+}
+
+/*
+ * ca_make_artwork
+ *
+ * Loads the image at `path` and returns a retained MPMediaItemArtwork* suitable
+ * for MPMediaItemPropertyArtwork in the Now Playing dictionary, or NULL if the
+ * image could not be loaded (caller then simply omits the artwork key).
+ *
+ * On iOS the image class is UIImage; on macOS it is NSImage.  Both respond to
+ * +imageWithContentsOfFile: (UIImage) / -initWithContentsOfFile: (NSImage); we
+ * use the class that exists at runtime so this single C file serves both.
+ *
+ * Ownership: the returned MPMediaItemArtwork is +1 (alloc/init) and the caller
+ * (NowPlayingInfo) keeps it cached until the artwork path changes, then releases
+ * the previous one.  The loaded image is retained and captured by the handler
+ * block, which the artwork object owns — so the image survives as long as the
+ * artwork does.
+ */
+void *ca_make_artwork(const char *path) {
+    if (!path) return NULL;
+
+    Class nsstr_cls = objc_getClass("NSString");
+    if (!nsstr_cls) return NULL;
+    void *ns_path = ((void *(*)(Class, SEL, const char *))objc_msgSend)(
+        nsstr_cls, sel_registerName("stringWithUTF8String:"), path);
+    if (!ns_path) return NULL;
+
+    /* Load the platform image (UIImage on iOS, NSImage on macOS). */
+    void *image = NULL;
+    Class ui_cls = objc_getClass("UIImage");
+    if (ui_cls) {
+        /* +[UIImage imageWithContentsOfFile:] — autoreleased; retain it. */
+        image = ((void *(*)(Class, SEL, void *))objc_msgSend)(
+            ui_cls, sel_registerName("imageWithContentsOfFile:"), ns_path);
+        if (image) image = ((void *(*)(void *, SEL))objc_msgSend)(
+            image, sel_registerName("retain"));
+    } else {
+        Class ns_cls = objc_getClass("NSImage");
+        if (!ns_cls) return NULL;
+        /* [[NSImage alloc] initWithContentsOfFile:] — owned (+1). */
+        void *alloc = ((void *(*)(Class, SEL))objc_msgSend)(
+            ns_cls, sel_registerName("alloc"));
+        if (!alloc) return NULL;
+        image = ((void *(*)(void *, SEL, void *))objc_msgSend)(
+            alloc, sel_registerName("initWithContentsOfFile:"), ns_path);
+    }
+    if (!image) return NULL;
+
+    /* Determine the bounds size from the image so the artwork advertises its
+     * real resolution: CGSize size = [image size]. */
+    ca_cgsize size = ((ca_cgsize (*)(void *, SEL))objc_msgSend)(
+        image, sel_registerName("size"));
+    if (size.width <= 0.0 || size.height <= 0.0) {
+        size.width = 512.0;
+        size.height = 512.0;
+    }
+
+    void *handler = artwork_request_block_create(image);
+    if (!handler) {
+        ((void (*)(void *, SEL))objc_msgSend)(image, sel_registerName("release"));
+        return NULL;
+    }
+
+    Class art_cls = objc_getClass("MPMediaItemArtwork");
+    if (!art_cls) {
+        _Block_release(handler);
+        ((void (*)(void *, SEL))objc_msgSend)(image, sel_registerName("release"));
+        return NULL;
+    }
+    void *art = ((void *(*)(Class, SEL))objc_msgSend)(
+        art_cls, sel_registerName("alloc"));
+    if (!art) {
+        _Block_release(handler);
+        ((void (*)(void *, SEL))objc_msgSend)(image, sel_registerName("release"));
+        return NULL;
+    }
+    /* -initWithBoundsSize:requestHandler: copies the block (which retains the
+     * captured image via our handler's ownership); the artwork object then owns
+     * the image's lifetime through the block. */
+    void *artwork = ((void *(*)(void *, SEL, ca_cgsize, void *))objc_msgSend)(
+        art, sel_registerName("initWithBoundsSize:requestHandler:"), size, handler);
+
+    /* The artwork copied the block on init; release our factory copy. The
+     * captured image stays alive via the artwork's copy of the block. */
+    _Block_release(handler);
+
+    return artwork; /* +1 (alloc/init); caller caches + releases on change */
+}
+
+/*
+ * ca_artwork_release — release a retained MPMediaItemArtwork (or any +1 object).
+ * NowPlayingInfo calls this when the cached artwork path changes so the previous
+ * artwork (and the image it owns) is freed.
+ */
+void ca_artwork_release(void *artwork) {
+    if (artwork) ((void (*)(void *, SEL))objc_msgSend)(
+        artwork, sel_registerName("release"));
+}
+
+/* =========================================================================
+ * 6. crystal_block_release
  *
  * Releases the heap block returned by any factory above.  Call this after
  * passing the block to the ObjC API; the API retains its own reference so

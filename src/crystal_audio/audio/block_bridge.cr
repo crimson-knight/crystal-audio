@@ -51,6 +51,17 @@ lib LibBlockBridge
 
   fun crystal_player_completion_block_create(fn : PlayerCompletionFn, ctx : Void*) : Void*
 
+  # ── MPMediaItemArtwork (lock-screen album art) ───────────────────────────────
+  # Build a retained MPMediaItemArtwork* from an image file path (UIImage on iOS,
+  # NSImage on macOS). The whole construction — image load, requestHandler block,
+  # artwork init — happens in C so the captured image lives on the native side,
+  # decoupled from Crystal's GC. Returns NULL if the image can't be loaded.
+  fun ca_make_artwork(path : LibC::Char*) : Void*
+
+  # Release a retained MPMediaItemArtwork* (frees the image it owns). Called by
+  # NowPlayingInfo when the cached artwork path changes.
+  fun ca_artwork_release(artwork : Void*)
+
   # ── Lifetime management ──────────────────────────────────────────────────────
   # Release the caller's reference. ObjC APIs retain their own copies;
   # call this immediately after the ObjC install call returns.

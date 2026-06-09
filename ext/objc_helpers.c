@@ -98,6 +98,15 @@ void ca_msg_void_f64(ca_id obj, ca_sel sel, double value) {
     ((void (*)(ca_id, ca_sel, double))objc_msgSend)(obj, sel, value);
 }
 
+// ── Void with NSUInteger arg ────────────────────────────────────────────────
+// setPlaybackState: (MPNowPlayingPlaybackState is an NSUInteger enum). Used to
+// drive the lock-screen play/pause GLYPH on iOS when the app is the now-playing
+// app: the info dict's playbackRate drives the scrubber, but iOS reads
+// MPNowPlayingInfoCenter.playbackState to choose the play vs pause icon.
+void ca_msg_void_u64(ca_id obj, ca_sel sel, uint64_t value) {
+    ((void (*)(ca_id, ca_sel, uint64_t))objc_msgSend)(obj, sel, value);
+}
+
 // ── AVAudioFile: initForReading:error: ──────────────────────────────────────
 
 // [[AVAudioFile alloc] initForReading:url error:&err]

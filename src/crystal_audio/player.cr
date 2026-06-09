@@ -331,11 +331,13 @@ module CrystalAudio
 
     # Set the master track whose metadata appears on lock screen.
     # Provide title/artist/duration to display. Call after play to update elapsed time.
-    def set_now_playing(title : String, artist : String = "", duration : Float64 = 0.0)
+    # artwork_path: absolute path to a lock-screen album-art image (e.g. app logo).
+    def set_now_playing(title : String, artist : String = "", duration : Float64 = 0.0, artwork_path : String? = nil)
       @now_playing ||= NowPlayingInfo.new
       @now_playing_title = title
       @now_playing_artist = artist
       @now_playing_duration = duration
+      @now_playing_artwork_path = artwork_path
       update_now_playing_state
     end
 
@@ -398,7 +400,8 @@ module CrystalAudio
         artist: @now_playing_artist,
         duration: @now_playing_duration || 0.0,
         elapsed: 0.0,
-        rate: rate
+        rate: rate,
+        artwork_path: @now_playing_artwork_path
       )
     end
 
@@ -406,6 +409,7 @@ module CrystalAudio
     @now_playing_title : String?
     @now_playing_artist : String?
     @now_playing_duration : Float64?
+    @now_playing_artwork_path : String?
     @remote_commands : RemoteCommandCenter?
 
     @stopping : Bool

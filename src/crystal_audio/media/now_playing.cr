@@ -9,6 +9,16 @@
 
 module CrystalAudio
   class NowPlayingInfo
+    # Mirrors MPNowPlayingPlaybackState so callers share one vocabulary across
+    # platforms (Android maps these onto its MediaSession state in Kotlin).
+    enum PlaybackState : UInt64
+      Unknown     = 0
+      Playing     = 1
+      Paused      = 2
+      Stopped     = 3
+      Interrupted = 4
+    end
+
     def initialize
     end
 
@@ -18,10 +28,16 @@ module CrystalAudio
       album : String? = nil,
       duration : Float64 = 0.0,
       elapsed : Float64 = 0.0,
-      rate : Float64 = 1.0
+      rate : Float64 = 1.0,
+      artwork_path : String? = nil
     )
       # On Android, metadata is pushed from the Kotlin MediaPlaybackService.
       # This could call JNI to update, but the service handles it directly.
+      # artwork_path is a no-op here (the MediaSession carries its own artwork).
+    end
+
+    # No-op on Android (the MediaSession owns playback state in Kotlin).
+    def playback_state=(state : PlaybackState)
     end
 
     def clear
@@ -50,8 +66,28 @@ end
 
 module CrystalAudio
   class NowPlayingInfo
+    # MPNowPlayingPlaybackState values. On iOS, when this app is the now-playing
+    # app, the lock-screen play/pause GLYPH is driven by
+    # MPNowPlayingInfoCenter.playbackState — NOT by the info dict's playbackRate
+    # (the rate drives the scrubber). Without setting this, iOS can keep showing
+    # the "playing" glyph after a pause (the B2.3 stale-state bug).
+    enum PlaybackState : UInt64
+      Unknown     = 0
+      Playing     = 1
+      Paused      = 2
+      Stopped     = 3
+      Interrupted = 4
+    end
+
     # MPNowPlayingInfoCenter singleton
     @center : LibObjC::Id
+
+    # Cached MPMediaItemArtwork* and the path it was built from. Lock-screen
+    # updates fire every second while playing, so we rebuild the (relatively
+    # expensive) artwork ONLY when the path changes — otherwise we reuse the
+    # cached object. nil path ⇒ no artwork cached.
+    @artwork : Void*
+    @artwork_path : String?
 
     def initialize
       @center = ObjC.send(
@@ -59,19 +95,28 @@ module CrystalAudio
         "defaultCenter"
       )
       raise "Failed to get MPNowPlayingInfoCenter" if @center.null?
+      @artwork = Pointer(Void).null
+      @artwork_path = nil
     end
 
     # Update the Now Playing info displayed on lock screen / Control Center.
+    #
+    # artwork_path: absolute path to an image file (e.g. the app logo). The
+    # built MPMediaItemArtwork is cached and only rebuilt when the path changes,
+    # so per-second elapsed-time updates do NOT reload the image.
     def update(
       title : String? = nil,
       artist : String? = nil,
       album : String? = nil,
       duration : Float64 = 0.0,
       elapsed : Float64 = 0.0,
-      rate : Float64 = 1.0
+      rate : Float64 = 1.0,
+      artwork_path : String? = nil
     )
-      keys = Array(Void*).new(6)
-      values = Array(Void*).new(6)
+      artwork = resolve_artwork(artwork_path)
+
+      keys = Array(Void*).new(7)
+      values = Array(Void*).new(7)
 
       if t = title
         keys << property_key("MPMediaItemPropertyTitle")
@@ -99,6 +144,11 @@ module CrystalAudio
       keys << property_key("MPNowPlayingInfoPropertyPlaybackRate")
       values << ObjC.nsnumber_double(rate)
 
+      unless artwork.null?
+        keys << property_key("MPMediaItemPropertyArtwork")
+        values << artwork
+      end
+
       return if keys.empty?
 
       dict = ObjC.nsdictionary_create(
@@ -109,14 +159,50 @@ module CrystalAudio
       ObjC.send_void(@center, "setNowPlayingInfo:", dict)
     end
 
+    # Return the cached MPMediaItemArtwork* for `path`, rebuilding only when the
+    # path changed since the last call. Returns a null pointer when no path is
+    # given (or the image fails to load) so the caller simply omits the artwork
+    # key. The previous artwork is released when the path changes so its image is
+    # freed (per-second updates with an unchanged path do no allocation).
+    private def resolve_artwork(path : String?) : Void*
+      return @artwork if path == @artwork_path
+
+      # Path changed (including to nil): drop the old artwork + its image.
+      unless @artwork.null?
+        LibBlockBridge.ca_artwork_release(@artwork)
+        @artwork = Pointer(Void).null
+      end
+      @artwork_path = path
+
+      if p = path
+        built = LibBlockBridge.ca_make_artwork(p.to_unsafe)
+        @artwork = built unless built.null?
+      end
+      @artwork
+    end
+
+    # Set MPNowPlayingInfoCenter.playbackState so iOS picks the correct
+    # lock-screen glyph (play vs pause). Call alongside update(rate:) — rate
+    # drives the scrubber; playbackState drives the glyph on iOS.
+    def playback_state=(state : PlaybackState)
+      ObjC.set_u64(@center, "setPlaybackState:", state.value)
+    end
+
     # Clear the Now Playing info.
     def clear
+      self.playback_state = PlaybackState::Stopped
       # setNowPlayingInfo:nil
       LibObjCHelpers.ca_msg_void_id(
         @center,
         LibObjC.sel_registerName("setNowPlayingInfo:"),
         Pointer(Void).null
       )
+      # Release the cached artwork (and its image) so a new session rebuilds it.
+      unless @artwork.null?
+        LibBlockBridge.ca_artwork_release(@artwork)
+        @artwork = Pointer(Void).null
+      end
+      @artwork_path = nil
     end
 
     # Look up an NSString* property key constant by name.

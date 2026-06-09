@@ -60,6 +60,9 @@ lib LibObjCHelpers
   # Void with double arg
   fun ca_msg_void_f64(obj : Void*, sel : Void*, value : Float64)
 
+  # Void with NSUInteger arg (setPlaybackState:)
+  fun ca_msg_void_u64(obj : Void*, sel : Void*, value : UInt64)
+
   # AVAudioFile: [[AVAudioFile alloc] initForReading:url error:&err]
   fun ca_audio_file_open(url : Void*) : Void*
 
@@ -193,6 +196,11 @@ module CrystalAudio
     # double setter
     def self.set_f64(receiver : LibObjC::Id, selector : String, value : Float64)
       LibObjCHelpers.ca_msg_void_f64(receiver, sel(selector), value)
+    end
+
+    # NSUInteger setter (setPlaybackState:)
+    def self.set_u64(receiver : LibObjC::Id, selector : String, value : UInt64)
+      LibObjCHelpers.ca_msg_void_u64(receiver, sel(selector), value)
     end
 
     # detachNode:

@@ -85,8 +85,11 @@ sample: ext
 	@echo "  Built samples/mic_recorder/mic_recorder"
 
 ## Run specs
+# -framework MediaPlayer so MPMediaItemArtwork / MPNowPlayingInfoCenter classes
+# load (NowPlayingInfo artwork specs); the class symbols are resolved at runtime
+# via objc_getClass, so the framework must be linked even with no direct symbol.
 spec: ext
-	crystal spec --link-flags="$(LINK_FLAGS)"
+	crystal spec --link-flags="$(LINK_FLAGS) -framework MediaPlayer"
 
 ## Build and run playback test (multi-track player verification)
 playback-test: ext
