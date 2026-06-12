@@ -25,7 +25,8 @@ module CrystalAudio
     def initialize(
       source : RecordingSource = RecordingSource::Microphone,
       output_path : String = "/data/local/tmp/recording.wav",
-      mic_output_path : String? = nil
+      mic_output_path : String? = nil,
+      mic_tap : Proc(Slice(UInt8), UInt32, UInt32, Float64, Nil)? = nil
     )
       @source = source
       @output_path = output_path
@@ -126,11 +127,13 @@ module CrystalAudio
     @ext_file     : LibAudioToolbox::ExtAudioFileRef
     @system_tap   : SystemAudioCapture?
     @sys_ext_file : LibAudioToolbox::ExtAudioFileRef
+    @mic_tap      : Proc(Slice(UInt8), UInt32, UInt32, Float64, Nil)?
 
     def initialize(
       source : RecordingSource = RecordingSource::Microphone,
       output_path : String = "/tmp/recording.wav",
-      mic_output_path : String? = nil
+      mic_output_path : String? = nil,
+      @mic_tap : Proc(Slice(UInt8), UInt32, UInt32, Float64, Nil)? = nil
     )
       @source = source
       @output_path = output_path
@@ -180,6 +183,7 @@ module CrystalAudio
 
       # ext_file is already Void* — pass it directly as user_data. No struct needed.
       ext_file_ud = @ext_file
+      tap_callback = @mic_tap
 
       # AudioQueue C callback — runs on OS audio thread, must NOT allocate Crystal objects.
       # Uses C helper to construct AudioBufferList (avoids Crystal struct layout issues).
@@ -195,6 +199,10 @@ module CrystalAudio
           CHANNELS,
           CHANNELS * (BITS_PER_SAMPLE // 8)
         )
+        unless tap_callback.nil?
+          bytes = Slice(UInt8).new(buf.value.audio_data.as(UInt8*), buf.value.audio_data_byte_size.to_i32, read_only: true)
+          tap_callback.not_nil!.call(bytes, CHANNELS, BITS_PER_SAMPLE, SAMPLE_RATE)
+        end
         LibAudioToolbox.AudioQueueEnqueueBuffer(aq, buffer_ref, 0, Pointer(LibAudioToolbox::AudioStreamPacketDescription).null)
       end
 
