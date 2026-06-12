@@ -122,12 +122,25 @@ module CrystalAudio
     getter mic_output_path : String?
     getter? recording      : Bool
 
+    # user_data for the AudioQueue C callback. The callback must be a plain
+    # (non-closure) Proc, so everything it needs travels through this state
+    # object instead of captured locals. Retained on the Recorder so the GC
+    # keeps it alive for the queue's lifetime.
+    private class MicQueueState
+      getter ext_file : LibAudioToolbox::ExtAudioFileRef
+      getter tap : Proc(Slice(UInt8), UInt32, UInt32, Float64, Nil)?
+
+      def initialize(@ext_file, @tap)
+      end
+    end
+
     @mutex        : Mutex
     @queue        : LibAudioToolbox::AudioQueueRef
     @ext_file     : LibAudioToolbox::ExtAudioFileRef
     @system_tap   : SystemAudioCapture?
     @sys_ext_file : LibAudioToolbox::ExtAudioFileRef
     @mic_tap      : Proc(Slice(UInt8), UInt32, UInt32, Float64, Nil)?
+    @mic_state    : MicQueueState?
 
     def initialize(
       source : RecordingSource = RecordingSource::Microphone,
@@ -181,34 +194,37 @@ module CrystalAudio
       asbd = mic_asbd
       @ext_file = open_ext_file(path, asbd)
 
-      # ext_file is already Void* — pass it directly as user_data. No struct needed.
-      ext_file_ud = @ext_file
-      tap_callback = @mic_tap
+      # All callback state rides through user_data: the callback Proc must be
+      # closure-free or it cannot cross the C boundary ("passing a closure to
+      # C is not allowed" at runtime). @mic_state retains the object so the GC
+      # cannot collect it while the queue is live.
+      state = MicQueueState.new(@ext_file, @mic_tap)
+      @mic_state = state
 
       # AudioQueue C callback — runs on OS audio thread, must NOT allocate Crystal objects.
       # Uses C helper to construct AudioBufferList (avoids Crystal struct layout issues).
       cb = LibAudioToolbox::AudioQueueInputCallback.new do |user_data, aq, buffer_ref, _ts, _npd, _pd|
-        ext_file = user_data.as(LibAudioToolbox::ExtAudioFileRef)
+        st = user_data.as(MicQueueState)
         buf = buffer_ref.as(LibAudioToolbox::AudioQueueBuffer*)
         next if buf.value.audio_data_byte_size == 0
 
         LibAudioWriteHelper.ca_ext_audio_file_write_pcm(
-          ext_file,
+          st.ext_file,
           buf.value.audio_data,
           buf.value.audio_data_byte_size,
           CHANNELS,
           CHANNELS * (BITS_PER_SAMPLE // 8)
         )
-        unless tap_callback.nil?
+        if tap = st.tap
           bytes = Slice(UInt8).new(buf.value.audio_data.as(UInt8*), buf.value.audio_data_byte_size.to_i32, read_only: true)
-          tap_callback.not_nil!.call(bytes, CHANNELS, BITS_PER_SAMPLE, SAMPLE_RATE)
+          tap.call(bytes, CHANNELS, BITS_PER_SAMPLE, SAMPLE_RATE)
         end
         LibAudioToolbox.AudioQueueEnqueueBuffer(aq, buffer_ref, 0, Pointer(LibAudioToolbox::AudioStreamPacketDescription).null)
       end
 
       aq = Pointer(Void).null
       status = LibAudioToolbox.AudioQueueNewInput(
-        pointerof(asbd), cb, ext_file_ud,
+        pointerof(asbd), cb, state.as(Void*),
         nil, nil, 0_u32, pointerof(aq)
       )
       raise "AudioQueueNewInput failed: #{status}" unless status == 0
@@ -232,6 +248,7 @@ module CrystalAudio
 
       LibAudioToolbox.ExtAudioFileDispose(@ext_file) unless @ext_file.null?
       @ext_file = Pointer(Void).null
+      @mic_state = nil
     end
 
     # ── Private: system audio tap ───────────────────────────────────────────
