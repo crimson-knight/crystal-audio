@@ -20,7 +20,7 @@ crystal-audio is a Crystal library that wraps macOS CoreAudio and AVFoundation s
 - Output to WAV (lossless) or AAC (.m4a)
 - No Screen Recording permission needed on macOS 14.2+ for system audio capture
 - Clean API for embedding in your own Crystal programs
-- Designed to extend with on-device transcription (whisper.cpp) or LLM post-processing
+- On-device transcription included — whisper.cpp bindings with batch and near-real-time streaming modes, plus an optional LLM formatting pipeline (see [Transcription Setup](#transcription-setup))
 
 ---
 
@@ -291,6 +291,45 @@ rec = CrystalAudio::Recorder.new(
   output_path: "/tmp/recording.m4a"
 )
 ```
+
+---
+
+## Transcription Setup
+
+`CrystalAudio::Transcription` ships whisper.cpp FFI bindings, so recorded audio
+can be transcribed on-device without leaving your machine:
+
+- `WhisperContext` — loads a GGML whisper model once and reuses it across
+  calls. `transcribe(samples)` returns `Segment`s with millisecond timestamps
+  and a speaker-turn flag; a block variant yields segments as the model
+  produces them.
+- `TranscribeConfig` — language, translation, beam search vs greedy, VAD, and
+  threading options per call.
+- `Streamer` — near-real-time transcription for dictation: push PCM samples as
+  they arrive and receive `Segment` callbacks, using a 5-second sliding window
+  with 500 ms overlap.
+
+Requirements:
+
+1. Build [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and make the
+   resulting `libwhisper` visible to the linker (for example
+   `crystal build --link-flags "-L/path/to/whisper.cpp/build/src"`).
+2. Download a GGML whisper model (see whisper.cpp's model docs).
+3. Feed 16 kHz mono float32 PCM — whisper.cpp's required input format.
+   Resample anything else before calling `transcribe`.
+
+If your program never calls the transcription API you do **not** need
+libwhisper installed — Crystal only links libraries whose functions are
+actually reachable in your build.
+
+### Optional LLM formatting pipeline
+
+`Transcription::Pipeline` is an optional second stage that post-processes the
+raw whisper transcript with the Claude API — modes for dictation cleanup,
+structured meeting notes, and spoken-code-to-syntax, with an overridable
+system prompt. It reads `ANTHROPIC_API_KEY` from the environment (or takes a
+key explicitly). Only this stage touches the network; the whisper stage is
+fully on-device.
 
 ---
 
