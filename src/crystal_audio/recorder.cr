@@ -158,7 +158,7 @@ end
       SAMPLE_RATE     = 44_100.0_f64
       CHANNELS        =        1_u32 # mono for mic; system tap returns stereo
       BITS_PER_SAMPLE =       16_u32
-      BUFFER_SIZE     =   0x4000_u32 # 16 KB ≈ 185ms at 44100 mono 16-bit
+      BUFFER_SIZE     =   0x1000_u32 # 4 KB ≈ 46ms at 44100 mono 16-bit
       NUM_BUFFERS     =            3 # triple buffering
 
       getter source : RecordingSource

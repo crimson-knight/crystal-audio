@@ -36,6 +36,16 @@ end
       rec.recording?.should be_false
     end
 
+    it "uses input buffers that can produce one thousand callbacks per minute" do
+      bytes_per_second = CrystalAudio::Recorder::SAMPLE_RATE *
+                         CrystalAudio::Recorder::CHANNELS *
+                         (CrystalAudio::Recorder::BITS_PER_SAMPLE / 8)
+      callbacks_per_minute = bytes_per_second * 60 /
+                             CrystalAudio::Recorder::BUFFER_SIZE
+
+      callbacks_per_minute.should be >= 1_000.0
+    end
+
     it "raises a named error when the current input device cannot be selected" do
       error = expect_raises(CrystalAudio::InputDeviceSelectionError) do
         CrystalAudio::AudioQueue.set_current_input_device(
