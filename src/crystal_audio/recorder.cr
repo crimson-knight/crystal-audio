@@ -1,351 +1,416 @@
+module CrystalAudio
+  # Identifies an input device selection failure while configuring an AudioQueue.
+  class InputDeviceSelectionError < Exception
+    # The UID that AudioQueue could not select.
+    getter input_device_uid : String
+
+    # The OSStatus returned while AudioQueue selected the input device.
+    getter status : Int32
+
+    def initialize(@input_device_uid : String, @status : Int32)
+      super("AudioQueueSetProperty(kAudioQueueProperty_CurrentDevice) failed for input device UID '#{@input_device_uid}': OSStatus #{@status}")
+    end
+  end
+end
+
 {% if flag?(:android) %}
+  # Android recording: delegate to AndroidRecorder (AAudio-based).
+  require "mutex"
 
-# Android recording: delegate to AndroidRecorder (AAudio-based).
-require "mutex"
-
-module CrystalAudio
-  enum RecordingSource
-    Microphone
-    System
-    Both
-  end
-
-  enum AudioOutputFormat
-    WAV
-    AAC
-  end
-
-  class Recorder
-    getter source : RecordingSource
-    getter output_path : String
-    getter? recording : Bool
-
-    @android_recorder : AndroidRecorder?
-
-    def initialize(
-      source : RecordingSource = RecordingSource::Microphone,
-      output_path : String = "/data/local/tmp/recording.wav",
-      mic_output_path : String? = nil,
-      mic_tap : Proc(Slice(UInt8), UInt32, UInt32, Float64, Nil)? = nil
-    )
-      @source = source
-      @output_path = output_path
-      @recording = false
+  module CrystalAudio
+    enum RecordingSource
+      Microphone
+      System
+      Both
     end
 
-    def start
-      raise "Already recording" if @recording
-      raise "Only microphone recording is supported on Android" unless @source == RecordingSource::Microphone
-
-      rec = AndroidRecorder.new(@output_path)
-      rec.start
-      @android_recorder = rec
-      @recording = true
+    enum AudioOutputFormat
+      WAV
+      AAC
     end
 
-    def stop
-      return unless @recording
-      @android_recorder.try(&.stop)
-      @android_recorder = nil
-      @recording = false
-    end
-  end
-end
+    class Recorder
+      getter source : RecordingSource
+      getter output_path : String
+      getter input_device_uid : String?
+      getter? recording : Bool
 
-{% elsif flag?(:darwin) %}
+      @android_recorder : AndroidRecorder?
 
-require "mutex"
+      def initialize(
+        source : RecordingSource = RecordingSource::Microphone,
+        output_path : String = "/data/local/tmp/recording.wav",
+        mic_output_path : String? = nil,
+        mic_tap : Proc(Slice(UInt8), UInt32, UInt32, Float64, Nil)? = nil,
+        input_device_uid : String? = nil,
+      )
+        raise ArgumentError.new("input_device_uid is supported only on macOS") if input_device_uid
 
-# C helper that constructs AudioBufferList on the C stack and calls
-# ExtAudioFileWrite — avoids Crystal struct layout issues.
-lib LibAudioWriteHelper
-  fun ca_ext_audio_file_write_pcm(
-    ext_file : Void*,
-    data : Void*,
-    byte_size : UInt32,
-    channels : UInt32,
-    bytes_per_frame : UInt32
-  ) : Int32
-end
-
-# High-level audio recording API.
-#
-# Supports three recording modes:
-#   - :microphone   — mic input only (AudioQueue, no blocks needed)
-#   - :system       — system audio only (CoreAudio tap / SCStream)
-#   - :both         — mic + system audio simultaneously as separate streams
-#
-# Output formats: :wav (lossless), :aac (compressed)
-#
-# Example — record mic for 10 seconds to a WAV file:
-#
-#   rec = CrystalAudio::Recorder.new(
-#     source: :microphone,
-#     output_path: "/tmp/recording.wav"
-#   )
-#   rec.start
-#   sleep 10.seconds
-#   rec.stop
-#
-# Example — record both streams in parallel:
-#
-#   rec = CrystalAudio::Recorder.new(
-#     source: :both,
-#     output_path: "/tmp/meeting.wav",         # system audio
-#     mic_output_path: "/tmp/dictation.wav"    # mic audio
-#   )
-#   rec.start
-#   # ... meeting happens ...
-#   rec.stop
-
-module CrystalAudio
-  enum RecordingSource
-    Microphone
-    System
-    Both
-  end
-
-  enum AudioOutputFormat
-    WAV
-    AAC
-  end
-
-  class Recorder
-    SAMPLE_RATE    =  44_100.0_f64
-    CHANNELS       =          1_u32  # mono for mic; system tap returns stereo
-    BITS_PER_SAMPLE =        16_u32
-    BUFFER_SIZE    = 0x4000_u32      # 16 KB ≈ 185ms at 44100 mono 16-bit
-    NUM_BUFFERS    =         3       # triple buffering
-
-    getter source          : RecordingSource
-    getter output_path     : String
-    getter mic_output_path : String?
-    getter? recording      : Bool
-
-    # user_data for the AudioQueue C callback. The callback must be a plain
-    # (non-closure) Proc, so everything it needs travels through this state
-    # object instead of captured locals. Retained on the Recorder so the GC
-    # keeps it alive for the queue's lifetime.
-    private class MicQueueState
-      getter ext_file : LibAudioToolbox::ExtAudioFileRef
-      getter tap : Proc(Slice(UInt8), UInt32, UInt32, Float64, Nil)?
-
-      def initialize(@ext_file, @tap)
+        @source = source
+        @output_path = output_path
+        @input_device_uid = input_device_uid
+        @recording = false
       end
-    end
 
-    @mutex        : Mutex
-    @queue        : LibAudioToolbox::AudioQueueRef
-    @ext_file     : LibAudioToolbox::ExtAudioFileRef
-    @system_tap   : SystemAudioCapture?
-    @sys_ext_file : LibAudioToolbox::ExtAudioFileRef
-    @mic_tap      : Proc(Slice(UInt8), UInt32, UInt32, Float64, Nil)?
-    @mic_state    : MicQueueState?
-
-    def initialize(
-      source : RecordingSource = RecordingSource::Microphone,
-      output_path : String = "/tmp/recording.wav",
-      mic_output_path : String? = nil,
-      @mic_tap : Proc(Slice(UInt8), UInt32, UInt32, Float64, Nil)? = nil
-    )
-      @source = source
-      @output_path = output_path
-      @mic_output_path = mic_output_path
-      @recording = false
-      @mutex = Mutex.new
-      @queue = Pointer(Void).null
-      @ext_file = Pointer(Void).null
-      @sys_ext_file = Pointer(Void).null
-    end
-
-    def start
-      @mutex.synchronize do
+      def start
         raise "Already recording" if @recording
+        raise "Only microphone recording is supported on Android" unless @source == RecordingSource::Microphone
 
-        case @source
-        when RecordingSource::Microphone
-          start_mic_queue(@output_path)
-        when RecordingSource::System
-          start_system_tap(@output_path)
-        when RecordingSource::Both
-          mic_path = @mic_output_path || derive_mic_path(@output_path)
-          start_mic_queue(mic_path)
-          start_system_tap(@output_path)
-        end
-
+        rec = AndroidRecorder.new(@output_path)
+        rec.start
+        @android_recorder = rec
         @recording = true
       end
-    end
 
-    def stop
-      @mutex.synchronize do
+      def stop
         return unless @recording
-
-        stop_mic_queue
-        stop_system_tap
-
+        @android_recorder.try(&.stop)
+        @android_recorder = nil
         @recording = false
       end
     end
+  end
+{% elsif flag?(:darwin) %}
+  require "mutex"
 
-    # ── Private: mic via AudioQueue ─────────────────────────────────────────
+  module CrystalAudio::AudioQueue
+    # :nodoc:
+    # Sets the current input device for *queue* before the queue starts.
+    def self.set_current_input_device(queue : LibAudioToolbox::AudioQueueRef, input_device_uid : String) : Nil
+      cf_input_device_uid = CF.string(input_device_uid)
+      status = -1
 
-    private def start_mic_queue(path : String)
-      asbd = mic_asbd
-      @ext_file = open_ext_file(path, asbd)
-
-      # All callback state rides through user_data: the callback Proc must be
-      # closure-free or it cannot cross the C boundary ("passing a closure to
-      # C is not allowed" at runtime). @mic_state retains the object so the GC
-      # cannot collect it while the queue is live.
-      state = MicQueueState.new(@ext_file, @mic_tap)
-      @mic_state = state
-
-      # AudioQueue C callback — runs on OS audio thread, must NOT allocate Crystal objects.
-      # Uses C helper to construct AudioBufferList (avoids Crystal struct layout issues).
-      cb = LibAudioToolbox::AudioQueueInputCallback.new do |user_data, aq, buffer_ref, _ts, _npd, _pd|
-        st = user_data.as(MicQueueState)
-        buf = buffer_ref.as(LibAudioToolbox::AudioQueueBuffer*)
-        next if buf.value.audio_data_byte_size == 0
-
-        LibAudioWriteHelper.ca_ext_audio_file_write_pcm(
-          st.ext_file,
-          buf.value.audio_data,
-          buf.value.audio_data_byte_size,
-          CHANNELS,
-          CHANNELS * (BITS_PER_SAMPLE // 8)
-        )
-        if tap = st.tap
-          bytes = Slice(UInt8).new(buf.value.audio_data.as(UInt8*), buf.value.audio_data_byte_size.to_i32, read_only: true)
-          tap.call(bytes, CHANNELS, BITS_PER_SAMPLE, SAMPLE_RATE)
+      begin
+        unless cf_input_device_uid.null?
+          status = LibAudioToolbox.AudioQueueSetProperty(
+            queue,
+            LibAudioToolbox::AUDIO_QUEUE_PROPERTY_CURRENT_DEVICE,
+            pointerof(cf_input_device_uid).as(Void*),
+            sizeof(LibCoreFoundation::CFStringRef).to_u32
+          )
         end
-        LibAudioToolbox.AudioQueueEnqueueBuffer(aq, buffer_ref, 0, Pointer(LibAudioToolbox::AudioStreamPacketDescription).null)
+      ensure
+        LibCoreFoundation.CFRelease(cf_input_device_uid) unless cf_input_device_uid.null?
       end
 
-      aq = Pointer(Void).null
-      status = LibAudioToolbox.AudioQueueNewInput(
-        pointerof(asbd), cb, state.as(Void*),
-        nil, nil, 0_u32, pointerof(aq)
-      )
-      raise "AudioQueueNewInput failed: #{status}" unless status == 0
-      @queue = aq
-
-      NUM_BUFFERS.times do
-        buf = Pointer(Void).null
-        LibAudioToolbox.AudioQueueAllocateBuffer(@queue, BUFFER_SIZE, pointerof(buf))
-        LibAudioToolbox.AudioQueueEnqueueBuffer(@queue, buf, 0_u32, Pointer(LibAudioToolbox::AudioStreamPacketDescription).null)
-      end
-
-      status = LibAudioToolbox.AudioQueueStart(@queue, nil)
-      raise "AudioQueueStart failed: #{status}" unless status == 0
-    end
-
-    private def stop_mic_queue
-      return if @queue.null?
-      LibAudioToolbox.AudioQueueStop(@queue, false)
-      LibAudioToolbox.AudioQueueDispose(@queue, true)
-      @queue = Pointer(Void).null
-
-      LibAudioToolbox.ExtAudioFileDispose(@ext_file) unless @ext_file.null?
-      @ext_file = Pointer(Void).null
-      @mic_state = nil
-    end
-
-    # ── Private: system audio tap ───────────────────────────────────────────
-
-    private def start_system_tap(path : String)
-      asbd = system_asbd
-      @sys_ext_file = open_ext_file(path, asbd)
-      sys_file_ref = @sys_ext_file  # local for callback capture
-
-      @system_tap = SystemAudioCapture.new
-      @system_tap.not_nil!.start do |frames, frame_count, channel_count|
-        bytes_per_frame = channel_count * 4_u32  # float32
-        LibAudioWriteHelper.ca_ext_audio_file_write_pcm(
-          sys_file_ref,
-          frames.to_unsafe.as(Void*),
-          frame_count * bytes_per_frame,
-          channel_count,
-          bytes_per_frame
-        )
-      end
-    end
-
-    private def stop_system_tap
-      @system_tap.try(&.stop)
-      @system_tap = nil
-
-      LibAudioToolbox.ExtAudioFileDispose(@sys_ext_file) unless @sys_ext_file.null?
-      @sys_ext_file = Pointer(Void).null
-    end
-
-    # ── Private: ASBD helpers ───────────────────────────────────────────────
-
-    private def mic_asbd : LibAudioToolbox::AudioStreamBasicDescription
-      asbd = LibAudioToolbox::AudioStreamBasicDescription.new
-      asbd.sample_rate = SAMPLE_RATE
-      asbd.format_id = LibAudioToolbox::AUDIO_FORMAT_LINEAR_PCM
-      asbd.format_flags = LibAudioToolbox::AUDIO_FORMAT_FLAG_IS_SIGNED_INT |
-                          LibAudioToolbox::AUDIO_FORMAT_FLAG_IS_PACKED
-      asbd.bytes_per_packet = CHANNELS * (BITS_PER_SAMPLE // 8)
-      asbd.frames_per_packet = 1_u32
-      asbd.bytes_per_frame = CHANNELS * (BITS_PER_SAMPLE // 8)
-      asbd.channels_per_frame = CHANNELS
-      asbd.bits_per_channel = BITS_PER_SAMPLE
-      asbd.reserved = 0_u32
-      asbd
-    end
-
-    private def system_asbd : LibAudioToolbox::AudioStreamBasicDescription
-      # System tap delivers stereo float32 at 48 kHz
-      asbd = LibAudioToolbox::AudioStreamBasicDescription.new
-      asbd.sample_rate = 48_000.0
-      asbd.format_id = LibAudioToolbox::AUDIO_FORMAT_LINEAR_PCM
-      asbd.format_flags = LibAudioToolbox::AUDIO_FORMAT_FLAG_IS_FLOAT |
-                          LibAudioToolbox::AUDIO_FORMAT_FLAG_IS_PACKED
-      asbd.bytes_per_packet = 2_u32 * 4_u32   # stereo * float32
-      asbd.frames_per_packet = 1_u32
-      asbd.bytes_per_frame = 2_u32 * 4_u32
-      asbd.channels_per_frame = 2_u32
-      asbd.bits_per_channel = 32_u32
-      asbd.reserved = 0_u32
-      asbd
-    end
-
-    private def open_ext_file(
-      path : String,
-      asbd : LibAudioToolbox::AudioStreamBasicDescription
-    ) : LibAudioToolbox::ExtAudioFileRef
-      url = CF.file_url(path)
-      file_type = path.ends_with?(".wav") ?
-        LibAudioToolbox::AUDIO_FILE_WAVE_TYPE :
-        LibAudioToolbox::AUDIO_FILE_M4A_TYPE
-
-      ext_file = Pointer(Void).null
-      status = LibAudioToolbox.ExtAudioFileCreateWithURL(
-        url, file_type, pointerof(asbd), nil, 0_u32, pointerof(ext_file)
-      )
-      LibCoreFoundation.CFRelease(url)
-      raise "ExtAudioFileCreateWithURL failed: #{status}" unless status == 0
-
-      # Set client format (what we write) = same as file format
-      status = LibAudioToolbox.ExtAudioFileSetProperty(
-        ext_file,
-        LibAudioToolbox::EXT_AUDIO_FILE_PROPERTY_CLIENT_DATA_FORMAT,
-        sizeof(LibAudioToolbox::AudioStreamBasicDescription).to_u32,
-        pointerof(asbd).as(Void*)
-      )
-      raise "ExtAudioFileSetProperty failed: #{status}" unless status == 0
-
-      ext_file
-    end
-
-    private def derive_mic_path(system_path : String) : String
-      ext = File.extname(system_path)
-      base = system_path[0..-(ext.size + 1)]
-      "#{base}_mic#{ext}"
+      raise InputDeviceSelectionError.new(input_device_uid, status) unless status == 0
     end
   end
-end
 
+  # C helper that constructs AudioBufferList on the C stack and calls
+  # ExtAudioFileWrite — avoids Crystal struct layout issues.
+  lib LibAudioWriteHelper
+    fun ca_ext_audio_file_write_pcm(
+      ext_file : Void*,
+      data : Void*,
+      byte_size : UInt32,
+      channels : UInt32,
+      bytes_per_frame : UInt32,
+    ) : Int32
+  end
+
+  # High-level audio recording API.
+  #
+  # A macOS microphone recording can target a Core Audio device UID with
+  # `input_device_uid`; `nil` follows the current system input device.
+  #
+  # Supports three recording modes:
+  #   - :microphone   — mic input only (AudioQueue, no blocks needed)
+  #   - :system       — system audio only (CoreAudio tap / SCStream)
+  #   - :both         — mic + system audio simultaneously as separate streams
+  #
+  # Output formats: :wav (lossless), :aac (compressed)
+  #
+  # Example — record mic for 10 seconds to a WAV file:
+  #
+  #   rec = CrystalAudio::Recorder.new(
+  #     source: :microphone,
+  #     output_path: "/tmp/recording.wav"
+  #   )
+  #   rec.start
+  #   sleep 10.seconds
+  #   rec.stop
+  #
+  # Example — record both streams in parallel:
+  #
+  #   rec = CrystalAudio::Recorder.new(
+  #     source: :both,
+  #     output_path: "/tmp/meeting.wav",         # system audio
+  #     mic_output_path: "/tmp/dictation.wav"    # mic audio
+  #   )
+  #   rec.start
+  #   # ... meeting happens ...
+  #   rec.stop
+
+  module CrystalAudio
+    enum RecordingSource
+      Microphone
+      System
+      Both
+    end
+
+    enum AudioOutputFormat
+      WAV
+      AAC
+    end
+
+    class Recorder
+      SAMPLE_RATE     = 44_100.0_f64
+      CHANNELS        =        1_u32 # mono for mic; system tap returns stereo
+      BITS_PER_SAMPLE =       16_u32
+      BUFFER_SIZE     =   0x4000_u32 # 16 KB ≈ 185ms at 44100 mono 16-bit
+      NUM_BUFFERS     =            3 # triple buffering
+
+      getter source : RecordingSource
+      getter output_path : String
+      getter mic_output_path : String?
+      getter input_device_uid : String?
+      getter? recording : Bool
+
+      # user_data for the AudioQueue C callback. The callback must be a plain
+      # (non-closure) Proc, so everything it needs travels through this state
+      # object instead of captured locals. Retained on the Recorder so the GC
+      # keeps it alive for the queue's lifetime.
+      private class MicQueueState
+        getter ext_file : LibAudioToolbox::ExtAudioFileRef
+        getter tap : Proc(Slice(UInt8), UInt32, UInt32, Float64, Nil)?
+
+        def initialize(@ext_file, @tap)
+        end
+      end
+
+      @mutex : Mutex
+      @queue : LibAudioToolbox::AudioQueueRef
+      @ext_file : LibAudioToolbox::ExtAudioFileRef
+      @system_tap : SystemAudioCapture?
+      @sys_ext_file : LibAudioToolbox::ExtAudioFileRef
+      @mic_tap : Proc(Slice(UInt8), UInt32, UInt32, Float64, Nil)?
+      @mic_state : MicQueueState?
+
+      def initialize(
+        source : RecordingSource = RecordingSource::Microphone,
+        output_path : String = "/tmp/recording.wav",
+        mic_output_path : String? = nil,
+        @mic_tap : Proc(Slice(UInt8), UInt32, UInt32, Float64, Nil)? = nil,
+        @input_device_uid : String? = nil,
+      )
+        @source = source
+        @output_path = output_path
+        @mic_output_path = mic_output_path
+        @recording = false
+        @mutex = Mutex.new
+        @queue = Pointer(Void).null
+        @ext_file = Pointer(Void).null
+        @sys_ext_file = Pointer(Void).null
+      end
+
+      def start
+        @mutex.synchronize do
+          raise "Already recording" if @recording
+
+          case @source
+          when RecordingSource::Microphone
+            start_mic_queue(@output_path)
+          when RecordingSource::System
+            start_system_tap(@output_path)
+          when RecordingSource::Both
+            mic_path = @mic_output_path || derive_mic_path(@output_path)
+            start_mic_queue(mic_path)
+            start_system_tap(@output_path)
+          end
+
+          @recording = true
+        end
+      end
+
+      def stop
+        @mutex.synchronize do
+          return unless @recording
+
+          stop_mic_queue
+          stop_system_tap
+
+          @recording = false
+        end
+      end
+
+      # ── Private: mic via AudioQueue ─────────────────────────────────────────
+
+      private def start_mic_queue(path : String)
+        asbd = mic_asbd
+        @ext_file = open_ext_file(path, asbd)
+
+        # All callback state rides through user_data: the callback Proc must be
+        # closure-free or it cannot cross the C boundary ("passing a closure to
+        # C is not allowed" at runtime). @mic_state retains the object so the GC
+        # cannot collect it while the queue is live.
+        state = MicQueueState.new(@ext_file, @mic_tap)
+        @mic_state = state
+
+        # AudioQueue C callback — runs on OS audio thread, must NOT allocate Crystal objects.
+        # Uses C helper to construct AudioBufferList (avoids Crystal struct layout issues).
+        cb = LibAudioToolbox::AudioQueueInputCallback.new do |user_data, aq, buffer_ref, _ts, _npd, _pd|
+          st = user_data.as(MicQueueState)
+          buf = buffer_ref.as(LibAudioToolbox::AudioQueueBuffer*)
+          next if buf.value.audio_data_byte_size == 0
+
+          LibAudioWriteHelper.ca_ext_audio_file_write_pcm(
+            st.ext_file,
+            buf.value.audio_data,
+            buf.value.audio_data_byte_size,
+            CHANNELS,
+            CHANNELS * (BITS_PER_SAMPLE // 8)
+          )
+          if tap = st.tap
+            bytes = Slice(UInt8).new(buf.value.audio_data.as(UInt8*), buf.value.audio_data_byte_size.to_i32, read_only: true)
+            tap.call(bytes, CHANNELS, BITS_PER_SAMPLE, SAMPLE_RATE)
+          end
+          LibAudioToolbox.AudioQueueEnqueueBuffer(aq, buffer_ref, 0, Pointer(LibAudioToolbox::AudioStreamPacketDescription).null)
+        end
+
+        aq = Pointer(Void).null
+        status = LibAudioToolbox.AudioQueueNewInput(
+          pointerof(asbd), cb, state.as(Void*),
+          nil, nil, 0_u32, pointerof(aq)
+        )
+        raise "AudioQueueNewInput failed: #{status}" unless status == 0
+        @queue = aq
+
+        if input_device_uid = @input_device_uid
+          begin
+            AudioQueue.set_current_input_device(@queue, input_device_uid)
+          rescue ex : InputDeviceSelectionError
+            dispose_unstarted_mic_queue
+            raise ex
+          end
+        end
+
+        NUM_BUFFERS.times do
+          buf = Pointer(Void).null
+          LibAudioToolbox.AudioQueueAllocateBuffer(@queue, BUFFER_SIZE, pointerof(buf))
+          LibAudioToolbox.AudioQueueEnqueueBuffer(@queue, buf, 0_u32, Pointer(LibAudioToolbox::AudioStreamPacketDescription).null)
+        end
+
+        status = LibAudioToolbox.AudioQueueStart(@queue, nil)
+        raise "AudioQueueStart failed: #{status}" unless status == 0
+      end
+
+      private def dispose_unstarted_mic_queue : Nil
+        unless @queue.null?
+          LibAudioToolbox.AudioQueueDispose(@queue, true)
+          @queue = Pointer(Void).null
+        end
+
+        unless @ext_file.null?
+          LibAudioToolbox.ExtAudioFileDispose(@ext_file)
+          @ext_file = Pointer(Void).null
+        end
+        @mic_state = nil
+      end
+
+      private def stop_mic_queue
+        return if @queue.null?
+        LibAudioToolbox.AudioQueueStop(@queue, false)
+        LibAudioToolbox.AudioQueueDispose(@queue, true)
+        @queue = Pointer(Void).null
+
+        LibAudioToolbox.ExtAudioFileDispose(@ext_file) unless @ext_file.null?
+        @ext_file = Pointer(Void).null
+        @mic_state = nil
+      end
+
+      # ── Private: system audio tap ───────────────────────────────────────────
+
+      private def start_system_tap(path : String)
+        asbd = system_asbd
+        @sys_ext_file = open_ext_file(path, asbd)
+        sys_file_ref = @sys_ext_file # local for callback capture
+
+        @system_tap = SystemAudioCapture.new
+        @system_tap.not_nil!.start do |frames, frame_count, channel_count|
+          bytes_per_frame = channel_count * 4_u32 # float32
+          LibAudioWriteHelper.ca_ext_audio_file_write_pcm(
+            sys_file_ref,
+            frames.to_unsafe.as(Void*),
+            frame_count * bytes_per_frame,
+            channel_count,
+            bytes_per_frame
+          )
+        end
+      end
+
+      private def stop_system_tap
+        @system_tap.try(&.stop)
+        @system_tap = nil
+
+        LibAudioToolbox.ExtAudioFileDispose(@sys_ext_file) unless @sys_ext_file.null?
+        @sys_ext_file = Pointer(Void).null
+      end
+
+      # ── Private: ASBD helpers ───────────────────────────────────────────────
+
+      private def mic_asbd : LibAudioToolbox::AudioStreamBasicDescription
+        asbd = LibAudioToolbox::AudioStreamBasicDescription.new
+        asbd.sample_rate = SAMPLE_RATE
+        asbd.format_id = LibAudioToolbox::AUDIO_FORMAT_LINEAR_PCM
+        asbd.format_flags = LibAudioToolbox::AUDIO_FORMAT_FLAG_IS_SIGNED_INT |
+                            LibAudioToolbox::AUDIO_FORMAT_FLAG_IS_PACKED
+        asbd.bytes_per_packet = CHANNELS * (BITS_PER_SAMPLE // 8)
+        asbd.frames_per_packet = 1_u32
+        asbd.bytes_per_frame = CHANNELS * (BITS_PER_SAMPLE // 8)
+        asbd.channels_per_frame = CHANNELS
+        asbd.bits_per_channel = BITS_PER_SAMPLE
+        asbd.reserved = 0_u32
+        asbd
+      end
+
+      private def system_asbd : LibAudioToolbox::AudioStreamBasicDescription
+        # System tap delivers stereo float32 at 48 kHz
+        asbd = LibAudioToolbox::AudioStreamBasicDescription.new
+        asbd.sample_rate = 48_000.0
+        asbd.format_id = LibAudioToolbox::AUDIO_FORMAT_LINEAR_PCM
+        asbd.format_flags = LibAudioToolbox::AUDIO_FORMAT_FLAG_IS_FLOAT |
+                            LibAudioToolbox::AUDIO_FORMAT_FLAG_IS_PACKED
+        asbd.bytes_per_packet = 2_u32 * 4_u32 # stereo * float32
+        asbd.frames_per_packet = 1_u32
+        asbd.bytes_per_frame = 2_u32 * 4_u32
+        asbd.channels_per_frame = 2_u32
+        asbd.bits_per_channel = 32_u32
+        asbd.reserved = 0_u32
+        asbd
+      end
+
+      private def open_ext_file(
+        path : String,
+        asbd : LibAudioToolbox::AudioStreamBasicDescription,
+      ) : LibAudioToolbox::ExtAudioFileRef
+        url = CF.file_url(path)
+        file_type = path.ends_with?(".wav") ? LibAudioToolbox::AUDIO_FILE_WAVE_TYPE : LibAudioToolbox::AUDIO_FILE_M4A_TYPE
+
+        ext_file = Pointer(Void).null
+        status = LibAudioToolbox.ExtAudioFileCreateWithURL(
+          url, file_type, pointerof(asbd), nil, 0_u32, pointerof(ext_file)
+        )
+        LibCoreFoundation.CFRelease(url)
+        raise "ExtAudioFileCreateWithURL failed: #{status}" unless status == 0
+
+        # Set client format (what we write) = same as file format
+        status = LibAudioToolbox.ExtAudioFileSetProperty(
+          ext_file,
+          LibAudioToolbox::EXT_AUDIO_FILE_PROPERTY_CLIENT_DATA_FORMAT,
+          sizeof(LibAudioToolbox::AudioStreamBasicDescription).to_u32,
+          pointerof(asbd).as(Void*)
+        )
+        raise "ExtAudioFileSetProperty failed: #{status}" unless status == 0
+
+        ext_file
+      end
+
+      private def derive_mic_path(system_path : String) : String
+        ext = File.extname(system_path)
+        base = system_path[0..-(ext.size + 1)]
+        "#{base}_mic#{ext}"
+      end
+    end
+  end
 {% end %}

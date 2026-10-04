@@ -8,76 +8,94 @@ describe CrystalAudio do
 end
 
 {% if flag?(:darwin) %}
+  describe CrystalAudio::MacOS do
+    it "detects macOS version" do
+      v = CrystalAudio::MacOS.version
+      v[:major].should be >= 13
+    end
 
-describe CrystalAudio::MacOS do
-  it "detects macOS version" do
-    v = CrystalAudio::MacOS.version
-    v[:major].should be >= 13
+    it "reports process tap availability correctly" do
+      v = CrystalAudio::MacOS.version
+      expected = v[:major] > 14 || (v[:major] == 14 && v[:minor] >= 2)
+      CrystalAudio::MacOS.process_tap?.should eq(expected)
+    end
   end
 
-  it "reports process tap availability correctly" do
-    v = CrystalAudio::MacOS.version
-    expected = v[:major] > 14 || (v[:major] == 14 && v[:minor] >= 2)
-    CrystalAudio::MacOS.process_tap?.should eq(expected)
-  end
-end
+  describe CrystalAudio::Recorder do
+    it "initializes with default options" do
+      rec = CrystalAudio::Recorder.new
+      rec.source.should eq(CrystalAudio::RecordingSource::Microphone)
+      rec.recording?.should be_false
+      rec.input_device_uid.should be_nil
+    end
 
-describe CrystalAudio::Recorder do
-  it "initializes with default options" do
-    rec = CrystalAudio::Recorder.new
-    rec.source.should eq(CrystalAudio::RecordingSource::Microphone)
-    rec.recording?.should be_false
-  end
+    it "stores a selected input device UID" do
+      rec = CrystalAudio::Recorder.new(input_device_uid: "BlackHole2ch_UID")
 
-  it "initializes with all sources" do
-    rec = CrystalAudio::Recorder.new(
-      source: CrystalAudio::RecordingSource::Both,
-      output_path: "/tmp/test_system.wav",
-      mic_output_path: "/tmp/test_mic.wav"
-    )
-    rec.output_path.should eq("/tmp/test_system.wav")
-    rec.mic_output_path.should eq("/tmp/test_mic.wav")
-  end
-end
+      rec.input_device_uid.should eq("BlackHole2ch_UID")
+      rec.recording?.should be_false
+    end
 
-describe CrystalAudio::AudioEngine do
-  it "initializes AVAudioEngine" do
-    engine = CrystalAudio::AudioEngine.new
-    engine.ptr.should_not be_nil
-    engine.running?.should be_false
-  end
+    it "raises a named error when the current input device cannot be selected" do
+      error = expect_raises(CrystalAudio::InputDeviceSelectionError) do
+        CrystalAudio::AudioQueue.set_current_input_device(
+          Pointer(Void).null,
+          "crystal-audio-spec-invalid-device"
+        )
+      end
 
-  it "provides input and output nodes" do
-    engine = CrystalAudio::AudioEngine.new
-    engine.input_node.should_not be_nil
-    engine.output_node.should_not be_nil
-    engine.main_mixer_node.should_not be_nil
-  end
-end
+      error.input_device_uid.should eq("crystal-audio-spec-invalid-device")
+      error.status.should_not eq(0)
+    end
 
-describe CrystalAudio::AudioPlayerNode do
-  it "initializes an AVAudioPlayerNode" do
-    node = CrystalAudio::AudioPlayerNode.new
-    node.ptr.should_not be_nil
-    node.playing?.should be_false
+    it "initializes with all sources" do
+      rec = CrystalAudio::Recorder.new(
+        source: CrystalAudio::RecordingSource::Both,
+        output_path: "/tmp/test_system.wav",
+        mic_output_path: "/tmp/test_mic.wav"
+      )
+      rec.output_path.should eq("/tmp/test_system.wav")
+      rec.mic_output_path.should eq("/tmp/test_mic.wav")
+    end
   end
 
-  it "sets and gets volume" do
-    node = CrystalAudio::AudioPlayerNode.new
-    node.volume = 0.5_f32
-    node.volume.should be_close(0.5_f32, 0.001_f32)
-  end
-end
+  describe CrystalAudio::AudioEngine do
+    it "initializes AVAudioEngine" do
+      engine = CrystalAudio::AudioEngine.new
+      engine.ptr.should_not be_nil
+      engine.running?.should be_false
+    end
 
-describe CrystalAudio::Player do
-  it "initializes with no tracks" do
-    player = CrystalAudio::Player.new
-    player.track_count.should eq(0)
-    player.playing?.should be_false
-    player.master_volume.should eq(1.0_f32)
+    it "provides input and output nodes" do
+      engine = CrystalAudio::AudioEngine.new
+      engine.input_node.should_not be_nil
+      engine.output_node.should_not be_nil
+      engine.main_mixer_node.should_not be_nil
+    end
   end
-end
 
+  describe CrystalAudio::AudioPlayerNode do
+    it "initializes an AVAudioPlayerNode" do
+      node = CrystalAudio::AudioPlayerNode.new
+      node.ptr.should_not be_nil
+      node.playing?.should be_false
+    end
+
+    it "sets and gets volume" do
+      node = CrystalAudio::AudioPlayerNode.new
+      node.volume = 0.5_f32
+      node.volume.should be_close(0.5_f32, 0.001_f32)
+    end
+  end
+
+  describe CrystalAudio::Player do
+    it "initializes with no tracks" do
+      player = CrystalAudio::Player.new
+      player.track_count.should eq(0)
+      player.playing?.should be_false
+      player.master_volume.should eq(1.0_f32)
+    end
+  end
 {% end %}
 
 describe CrystalAudio::Transcription::TranscribeConfig do

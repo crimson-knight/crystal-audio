@@ -108,6 +108,22 @@ The `record` binary accepts an optional mode, an optional duration (in seconds),
 | `meeting` | System audio + microphone simultaneously — two output files |
 | `system` | System audio only (everything your Mac is playing) |
 
+### Select a microphone input device
+
+Pass the Core Audio device UID to `CrystalAudio::Recorder`. This selects the
+queue's input directly and leaves the system default input unchanged.
+
+```crystal
+recorder = CrystalAudio::Recorder.new(
+  output_path: "/tmp/blackhole.wav",
+  input_device_uid: "BlackHole2ch_UID"
+)
+recorder.start
+```
+
+If Core Audio cannot apply the UID, `InputDeviceSelectionError` includes the
+requested UID and the returned OSStatus.
+
 ### Examples
 
 ```bash
