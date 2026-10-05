@@ -58,6 +58,65 @@ end
       error.status.should_not eq(0)
     end
 
+    it "warms up the input path without starting a recording" do
+      CrystalAudio::Recorder.warm_up_input
+      CrystalAudio::Recorder.warm_up_input("crystal-audio-spec-invalid-device")
+
+      CrystalAudio::Recorder.new.recording?.should be_false
+    end
+
+    it "returns at once from wait_until_started when no start is pending" do
+      rec = CrystalAudio::Recorder.new
+
+      rec.wait_until_started
+
+      rec.recording?.should be_false
+    end
+
+    it "leaves the recorder stopped when a non-blocking start cannot use the input device" do
+      output_path = File.tempname("crystal-audio-spec", ".wav")
+      rec = CrystalAudio::Recorder.new(
+        output_path: output_path,
+        input_device_uid: "crystal-audio-spec-invalid-device"
+      )
+
+      # Core Audio reports an unknown device either when the queue selects it
+      # or when the queue starts; both must leave the recorder stopped.
+      begin
+        rec.start_without_waiting
+        expect_raises(Exception, /AudioQueueStart failed/) do
+          rec.wait_until_started
+        end
+      rescue CrystalAudio::InputDeviceSelectionError
+      end
+
+      rec.recording?.should be_false
+    ensure
+      File.delete(output_path) if output_path && File.exists?(output_path)
+    end
+
+    # Records from a real input device: set CRYSTAL_AUDIO_SPEC_INPUT_DEVICE_UID
+    # (for example BlackHole2ch_UID) to run it.
+    if input_device_uid = ENV["CRYSTAL_AUDIO_SPEC_INPUT_DEVICE_UID"]?
+      it "records audio after a non-blocking start" do
+        output_path = File.tempname("crystal-audio-spec", ".wav")
+        CrystalAudio::Recorder.warm_up_input(input_device_uid)
+        rec = CrystalAudio::Recorder.new(output_path: output_path, input_device_uid: input_device_uid)
+
+        rec.start_without_waiting
+        rec.recording?.should be_true
+        rec.wait_until_started
+        sleep 300.milliseconds
+        rec.stop
+
+        rec.recording?.should be_false
+        # A 44-byte WAV header plus at least 100 ms of 16-bit mono samples.
+        File.size(output_path).should be > 44 + 8_820
+      ensure
+        File.delete(output_path) if output_path && File.exists?(output_path)
+      end
+    end
+
     it "initializes with all sources" do
       rec = CrystalAudio::Recorder.new(
         source: CrystalAudio::RecordingSource::Both,

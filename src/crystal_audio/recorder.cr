@@ -62,6 +62,18 @@ end
         @recording = true
       end
 
+      # Android starts synchronously; these keep the macOS call shape.
+      def self.warm_up_input(input_device_uid : String? = nil) : Nil
+        raise ArgumentError.new("input_device_uid is supported only on macOS") if input_device_uid
+      end
+
+      def start_without_waiting : Nil
+        start
+      end
+
+      def wait_until_started : Nil
+      end
+
       def stop
         return unless @recording
         @android_recorder.try(&.stop)
@@ -97,6 +109,14 @@ end
     end
   end
 
+  # C helpers (ext/audio_queue_start.c) that run AudioQueueStart and the
+  # one-time Core Audio input setup on a dispatch queue, in plain C.
+  lib LibAudioQueueStart
+    fun ca_audio_queue_start_async(queue : LibAudioToolbox::AudioQueueRef) : Void*
+    fun ca_audio_queue_start_wait(handle : Void*) : Int32
+    fun ca_audio_input_warm_up_async(device_uid : UInt8*) : Void
+  end
+
   # C helper that constructs AudioBufferList on the C stack and calls
   # ExtAudioFileWrite — avoids Crystal struct layout issues.
   lib LibAudioWriteHelper
@@ -130,6 +150,15 @@ end
   #   rec.start
   #   sleep 10.seconds
   #   rec.stop
+  #
+  # Example — start a microphone recording without waiting for the input
+  # device, do other work (draw a recording indicator), then confirm:
+  #
+  #   CrystalAudio::Recorder.warm_up_input # once, while idle
+  #   rec = CrystalAudio::Recorder.new(output_path: "/tmp/recording.wav")
+  #   rec.start_without_waiting
+  #   # ... other work on this thread while the device spins up ...
+  #   rec.wait_until_started # raises if the device did not start
   #
   # Example — record both streams in parallel:
   #
@@ -186,6 +215,9 @@ end
       @sys_ext_file : LibAudioToolbox::ExtAudioFileRef
       @mic_tap : Proc(Slice(UInt8), UInt32, UInt32, Float64, Nil)?
       @mic_state : MicQueueState?
+      # The handle of an AudioQueueStart running on a dispatch queue; null
+      # when no start is pending.
+      @pending_mic_start : Void*
 
       def initialize(
         source : RecordingSource = RecordingSource::Microphone,
@@ -202,6 +234,21 @@ end
         @queue = Pointer(Void).null
         @ext_file = Pointer(Void).null
         @sys_ext_file = Pointer(Void).null
+        @pending_mic_start = Pointer(Void).null
+      end
+
+      # Pays Core Audio's one-time input setup ahead of the first recording,
+      # on a background dispatch queue, and returns at once. It creates one
+      # input queue for *input_device_uid* (`nil` for the system input
+      # device) and disposes it without starting it, so the device stays
+      # closed and the microphone indicator stays off. Call it while idle,
+      # for example after launch.
+      def self.warm_up_input(input_device_uid : String? = nil) : Nil
+        if device_uid = input_device_uid
+          LibAudioQueueStart.ca_audio_input_warm_up_async(device_uid.to_unsafe)
+        else
+          LibAudioQueueStart.ca_audio_input_warm_up_async(Pointer(UInt8).null)
+        end
       end
 
       def start
@@ -223,10 +270,51 @@ end
         end
       end
 
+      # Starts a microphone recording without waiting for the input device:
+      # the WAV file and the AudioQueue are ready when this returns, and
+      # AudioQueueStart runs on a dispatch queue. Call `wait_until_started`
+      # before relying on the recording; `recording?` is true from here on.
+      # System and Both sources start synchronously, as `start` does.
+      def start_without_waiting : Nil
+        unless @source.microphone?
+          start
+          return
+        end
+
+        @mutex.synchronize do
+          raise "Already recording" if @recording
+
+          create_mic_queue(@output_path)
+          pending_start = LibAudioQueueStart.ca_audio_queue_start_async(@queue)
+          if pending_start.null?
+            start_created_mic_queue
+          else
+            @pending_mic_start = pending_start
+          end
+          @recording = true
+        end
+      end
+
+      # Waits for the AudioQueueStart begun by `start_without_waiting`.
+      # Returns at once when no start is pending. When the device did not
+      # start, the queue and the WAV file are disposed, `recording?` turns
+      # false, and this raises.
+      def wait_until_started : Nil
+        @mutex.synchronize do
+          status = take_pending_mic_start_status
+          return if status == 0
+
+          dispose_unstarted_mic_queue
+          @recording = false
+          raise "AudioQueueStart failed: #{status}"
+        end
+      end
+
       def stop
         @mutex.synchronize do
           return unless @recording
 
+          take_pending_mic_start_status
           stop_mic_queue
           stop_system_tap
 
@@ -237,6 +325,31 @@ end
       # ── Private: mic via AudioQueue ─────────────────────────────────────────
 
       private def start_mic_queue(path : String)
+        create_mic_queue(path)
+        start_created_mic_queue
+      end
+
+      # The status of the pending dispatch-queue start, after waiting for
+      # it; 0 when none was pending.
+      private def take_pending_mic_start_status : Int32
+        pending_start = @pending_mic_start
+        return 0 if pending_start.null?
+
+        @pending_mic_start = Pointer(Void).null
+        LibAudioQueueStart.ca_audio_queue_start_wait(pending_start)
+      end
+
+      private def start_created_mic_queue : Nil
+        status = LibAudioToolbox.AudioQueueStart(@queue, nil)
+        return if status == 0
+
+        dispose_unstarted_mic_queue
+        raise "AudioQueueStart failed: #{status}"
+      end
+
+      # Opens the WAV file and creates the input queue with its buffers
+      # enqueued, ready for AudioQueueStart.
+      private def create_mic_queue(path : String) : Nil
         asbd = mic_asbd
         @ext_file = open_ext_file(path, asbd)
 
@@ -290,9 +403,6 @@ end
           LibAudioToolbox.AudioQueueAllocateBuffer(@queue, BUFFER_SIZE, pointerof(buf))
           LibAudioToolbox.AudioQueueEnqueueBuffer(@queue, buf, 0_u32, Pointer(LibAudioToolbox::AudioStreamPacketDescription).null)
         end
-
-        status = LibAudioToolbox.AudioQueueStart(@queue, nil)
-        raise "AudioQueueStart failed: #{status}" unless status == 0
       end
 
       private def dispose_unstarted_mic_queue : Nil

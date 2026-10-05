@@ -67,6 +67,7 @@ crystal build your_app.cr --link-flags=" \
   lib/crystal_audio/ext/objc_helpers.o \
   lib/crystal_audio/ext/system_audio_tap.o \
   lib/crystal_audio/ext/audio_write_helper.o \
+  lib/crystal_audio/ext/audio_queue_start.o \
   -framework AVFoundation -framework AudioToolbox \
   -framework CoreAudio -framework CoreFoundation \
   -framework CoreMedia -framework Foundation \

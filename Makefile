@@ -26,13 +26,14 @@ EXT_OBJC_HELPERS     := ext/objc_helpers.o
 EXT_SYSTEM_AUDIO_TAP := ext/system_audio_tap.o
 EXT_APPKIT_HELPERS   := ext/appkit_helpers.o
 EXT_AUDIO_WRITE      := ext/audio_write_helper.o
+EXT_AUDIO_QUEUE_START := ext/audio_queue_start.o
 
 .PHONY: all ext sample spec clean macos-app ios-ext ios-lib ios-app playback-test completion-test lockscreen-test android-lib android-app
 
 all: ext
 
 ## Compile C/ObjC native extensions
-ext: $(EXT_BLOCK_BRIDGE) $(EXT_OBJC_HELPERS) $(EXT_SYSTEM_AUDIO_TAP) $(EXT_APPKIT_HELPERS) $(EXT_AUDIO_WRITE)
+ext: $(EXT_BLOCK_BRIDGE) $(EXT_OBJC_HELPERS) $(EXT_SYSTEM_AUDIO_TAP) $(EXT_APPKIT_HELPERS) $(EXT_AUDIO_WRITE) $(EXT_AUDIO_QUEUE_START)
 
 $(EXT_BLOCK_BRIDGE): ext/block_bridge.c
 	$(CLANG) $(CFLAGS) -c $< -o $@
@@ -54,8 +55,12 @@ $(EXT_AUDIO_WRITE): ext/audio_write_helper.c
 	$(CLANG) $(CFLAGS) -c $< -o $@
 	@echo "  Built $@"
 
+$(EXT_AUDIO_QUEUE_START): ext/audio_queue_start.c
+	$(CLANG) $(CFLAGS) -c $< -o $@
+	@echo "  Built $@"
+
 LINK_FLAGS := $(CURDIR)/ext/block_bridge.o $(CURDIR)/ext/objc_helpers.o $(CURDIR)/ext/system_audio_tap.o \
-  $(CURDIR)/ext/audio_write_helper.o \
+  $(CURDIR)/ext/audio_write_helper.o $(CURDIR)/ext/audio_queue_start.o \
   -framework AVFoundation -framework AudioToolbox \
   -framework CoreAudio -framework CoreFoundation \
   -framework CoreMedia -framework Foundation \
@@ -63,7 +68,7 @@ LINK_FLAGS := $(CURDIR)/ext/block_bridge.o $(CURDIR)/ext/objc_helpers.o $(CURDIR
 
 APPKIT_LINK_FLAGS := $(CURDIR)/ext/block_bridge.o $(CURDIR)/ext/objc_helpers.o \
   $(CURDIR)/ext/system_audio_tap.o $(CURDIR)/ext/appkit_helpers.o \
-  $(CURDIR)/ext/audio_write_helper.o \
+  $(CURDIR)/ext/audio_write_helper.o $(CURDIR)/ext/audio_queue_start.o \
   -framework AppKit -framework AVFoundation -framework AudioToolbox \
   -framework CoreAudio -framework CoreFoundation \
   -framework CoreMedia -framework Foundation \
