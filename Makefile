@@ -14,6 +14,7 @@
 #   make ios-lib      — build Crystal static library for iOS Simulator
 #   make ios-app      — build complete iOS app for Simulator (requires xcodegen)
 
+CRYSTAL    ?= crystal-alpha
 CLANG      := $(shell xcrun --find clang)
 SDK        := $(shell xcrun --show-sdk-path)
 ARCH       := $(shell uname -m)
@@ -76,7 +77,7 @@ APPKIT_LINK_FLAGS := $(CURDIR)/ext/block_bridge.o $(CURDIR)/ext/objc_helpers.o \
 
 ## Build the simple recorder sample (primary entry point)
 record: ext
-	crystal build samples/record/main.cr \
+	$(CRYSTAL) build samples/record/main.cr \
 	  -o samples/record/record \
 	  --link-flags="$(LINK_FLAGS)"
 	@echo "  Built samples/record/record"
@@ -84,7 +85,7 @@ record: ext
 
 ## Build mic_recorder sample (requires ext)
 sample: ext
-	crystal build samples/mic_recorder/main.cr \
+	$(CRYSTAL) build samples/mic_recorder/main.cr \
 	  -o samples/mic_recorder/mic_recorder \
 	  --link-flags="$(LINK_FLAGS)"
 	@echo "  Built samples/mic_recorder/mic_recorder"
@@ -93,12 +94,23 @@ sample: ext
 # -framework MediaPlayer so MPMediaItemArtwork / MPNowPlayingInfoCenter classes
 # load (NowPlayingInfo artwork specs); the class symbols are resolved at runtime
 # via objc_getClass, so the framework must be linked even with no direct symbol.
-spec: ext
-	crystal spec --link-flags="$(LINK_FLAGS) -framework MediaPlayer"
+spec: ext spec-pending-ownership spec-setup-cleanup
+	$(CRYSTAL) spec --link-flags="$(LINK_FLAGS) -framework MediaPlayer"
+
+## Exercise the production wrapper against a delayed native worker boundary.
+spec-pending-ownership: ext
+	$(CLANG) $(CFLAGS) -c spec/fixtures/system_audio_pending_fixture.c -o spec/fixtures/system_audio_pending_fixture.o
+	$(CRYSTAL) spec spec/native/pending_system_audio_spec.cr -Daudio_pending_fixture \
+	  --link-flags="$(filter-out $(CURDIR)/ext/system_audio_tap.o,$(LINK_FLAGS)) $(CURDIR)/spec/fixtures/system_audio_pending_fixture.o"
+
+spec-setup-cleanup: ext
+	$(CLANG) $(CFLAGS) -c spec/fixtures/recorder_setup_fixture.c -o spec/fixtures/recorder_setup_fixture.o
+	$(CRYSTAL) spec spec/native/recorder_setup_spec.cr -Daudio_setup_fixture \
+	  --link-flags="$(filter-out $(CURDIR)/ext/audio_queue_start.o,$(LINK_FLAGS)) $(CURDIR)/spec/fixtures/recorder_setup_fixture.o"
 
 ## Build and run playback test (multi-track player verification)
 playback-test: ext
-	crystal build samples/playback_test/main.cr \
+	$(CRYSTAL) build samples/playback_test/main.cr \
 	  -o samples/playback_test/playback_test \
 	  --link-flags="$(LINK_FLAGS)"
 	@echo "  Built samples/playback_test/playback_test"
@@ -107,7 +119,7 @@ playback-test: ext
 
 ## Build and run completion-callback test (realtime, DataPlayedBack)
 completion-test: ext
-	crystal build samples/completion_test/main.cr \
+	$(CRYSTAL) build samples/completion_test/main.cr \
 	  -o samples/completion_test/completion_test \
 	  --link-flags="$(LINK_FLAGS)"
 	@echo "  Built samples/completion_test/completion_test"
@@ -116,7 +128,7 @@ completion-test: ext
 
 ## Build and run lock screen controls test
 lockscreen-test: ext
-	crystal build samples/lockscreen_test/main.cr \
+	$(CRYSTAL) build samples/lockscreen_test/main.cr \
 	  -o samples/lockscreen_test/lockscreen_test \
 	  --link-flags="$(LINK_FLAGS) -framework MediaPlayer"
 	@echo "  Built samples/lockscreen_test/lockscreen_test"
@@ -125,7 +137,7 @@ lockscreen-test: ext
 
 ## Build macOS desktop app with graphical UI
 macos-app: ext
-	crystal build samples/macos_app/main.cr \
+	$(CRYSTAL) build samples/macos_app/main.cr \
 	  -o samples/macos_app/crystal_audio_demo \
 	  --link-flags="$(APPKIT_LINK_FLAGS)"
 	@echo "  Built samples/macos_app/crystal_audio_demo"

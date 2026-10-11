@@ -800,9 +800,7 @@ static void system_audio_tap_start_run(void *argument) {
         SystemAudioTapHandle *handle =
             system_audio_tap_create(pending->callback, pending->context, &create_status);
         if (!handle) {
-            pending->create_status = (create_status != noErr)
-                                     ? create_status
-                                     : kAudioHardwareUnspecifiedError;
+            pending->create_status = create_status;
         } else {
             pending->start_status = system_audio_tap_start(handle);
             if (pending->start_status == noErr) {

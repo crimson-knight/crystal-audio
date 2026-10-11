@@ -382,11 +382,12 @@ end
         @mutex.synchronize do
           return unless @recording
 
-          finish_pending_start
+          start_error_message = finish_pending_start
           stop_mic_queue
           stop_system_tap
 
           @recording = false
+          raise start_error_message if start_error_message
         end
       end
 
@@ -397,15 +398,15 @@ end
         start_created_mic_queue
       end
 
-      # Begins AudioQueueStart on the created queue on a dispatch queue, or
-      # starts it here when no pending start could be allocated.
+      # Begins AudioQueueStart on the created queue on a dispatch queue.
+      # Scheduling failure releases the prepared queue and WAV file.
       private def begin_mic_queue_start : Nil
         pending_start = LibAudioQueueStart.ca_audio_queue_start_async(@queue)
         if pending_start.null?
-          start_created_mic_queue
-        else
-          @pending_mic_start = pending_start
+          dispose_unstarted_mic_queue
+          raise "AudioQueue start could not be scheduled"
         end
+        @pending_mic_start = pending_start
       end
 
       # Waits for whatever `start_without_waiting` left pending and returns
@@ -494,8 +495,11 @@ end
           pointerof(asbd), cb, state.as(Void*),
           nil, nil, 0_u32, pointerof(aq)
         )
-        raise "AudioQueueNewInput failed: #{status}" unless status == 0
         @queue = aq
+        unless status == 0
+          dispose_unstarted_mic_queue
+          raise "AudioQueueNewInput failed: #{status}"
+        end
 
         if input_device_uid = @input_device_uid
           begin
@@ -508,8 +512,16 @@ end
 
         NUM_BUFFERS.times do
           buf = Pointer(Void).null
-          LibAudioToolbox.AudioQueueAllocateBuffer(@queue, BUFFER_SIZE, pointerof(buf))
-          LibAudioToolbox.AudioQueueEnqueueBuffer(@queue, buf, 0_u32, Pointer(LibAudioToolbox::AudioStreamPacketDescription).null)
+          status = LibAudioToolbox.AudioQueueAllocateBuffer(@queue, BUFFER_SIZE, pointerof(buf))
+          unless status == 0
+            dispose_unstarted_mic_queue
+            raise "AudioQueueAllocateBuffer failed: #{status}"
+          end
+          status = LibAudioToolbox.AudioQueueEnqueueBuffer(@queue, buf, 0_u32, Pointer(LibAudioToolbox::AudioStreamPacketDescription).null)
+          unless status == 0
+            dispose_unstarted_mic_queue
+            raise "AudioQueueEnqueueBuffer failed: #{status}"
+          end
         end
       end
 
@@ -644,7 +656,10 @@ end
           url, file_type, pointerof(asbd), nil, 0_u32, pointerof(ext_file)
         )
         LibCoreFoundation.CFRelease(url)
-        raise "ExtAudioFileCreateWithURL failed: #{status}" unless status == 0
+        unless status == 0
+          LibAudioToolbox.ExtAudioFileDispose(ext_file) unless ext_file.null?
+          raise "ExtAudioFileCreateWithURL failed: #{status}"
+        end
 
         # Set client format (what we write) = same as file format
         status = LibAudioToolbox.ExtAudioFileSetProperty(
@@ -653,7 +668,10 @@ end
           sizeof(LibAudioToolbox::AudioStreamBasicDescription).to_u32,
           pointerof(asbd).as(Void*)
         )
-        raise "ExtAudioFileSetProperty failed: #{status}" unless status == 0
+        unless status == 0
+          LibAudioToolbox.ExtAudioFileDispose(ext_file)
+          raise "ExtAudioFileSetProperty failed: #{status}"
+        end
 
         ext_file
       end
