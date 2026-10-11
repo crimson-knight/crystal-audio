@@ -7,6 +7,7 @@ require "../../src/crystal_audio"
   lib LibPendingAudioFixture
     fun pending_fixture_reset(allocation : Int32, creation : Int32) : Void
     fun pending_fixture_release : Void
+    fun pending_fixture_release_after_delay : Void
     fun pending_fixture_stop_started : Void
     fun pending_fixture_stop_finished : Void
     fun pending_fixture_wait_for_finish : Int32
@@ -18,6 +19,43 @@ require "../../src/crystal_audio"
   end
 
   describe "Native pending system-audio ownership" do
+    it "reports recorder startup unfinished promptly while its native waiter owns the handles" do
+      LibPendingAudioFixture.pending_fixture_reset(0, 0)
+      recorder = CrystalAudio::Recorder.new(source: CrystalAudio::RecordingSource::System, output_path: File.join(Dir.tempdir, "pending-recorder-fixture-#{Process.pid}.wav"))
+      recorder.start_without_waiting
+      confirmer = Thread.new { recorder.wait_until_started }
+      LibPendingAudioFixture.pending_fixture_wait_for_finish.should eq(1)
+      releaser = Thread.new { LibPendingAudioFixture.pending_fixture_release_after_delay }
+      started_at = Time.instant
+      was_finished = recorder.start_finished?
+      elapsed_ms = (Time.instant - started_at).total_milliseconds
+      confirmer.join
+      releaser.join
+      recorder.stop
+      was_finished.should be_false
+      elapsed_ms.should be < 50.0
+      LibPendingAudioFixture.pending_fixture_finishes.should eq(1)
+      LibPendingAudioFixture.pending_fixture_destroys.should eq(1)
+    end
+
+    it "reports unfinished promptly while a native finisher still owns the start" do
+      LibPendingAudioFixture.pending_fixture_reset(0, 0)
+      capture = CrystalAudio::SystemAudioCapture.new
+      capture.start_without_waiting { |_, _, _| }
+      confirmer = Thread.new { capture.finish_start }
+      LibPendingAudioFixture.pending_fixture_wait_for_finish.should eq(1)
+      releaser = Thread.new { LibPendingAudioFixture.pending_fixture_release_after_delay }
+      started_at = Time.instant
+      was_finished = capture.start_finished?
+      elapsed_ms = (Time.instant - started_at).total_milliseconds
+      confirmer.join
+      releaser.join
+      capture.stop
+      was_finished.should be_false
+      elapsed_ms.should be < 50.0
+      LibPendingAudioFixture.pending_fixture_destroys.should eq(1)
+    end
+
     it "retains its callback while pending and releases the successful tap once" do
       LibPendingAudioFixture.pending_fixture_reset(0, 0)
       callback_count = 0

@@ -182,11 +182,14 @@
       # True when `finish_start` would return without waiting: no start is
       # pending, or the pending one has finished on its dispatch queue.
       def start_finished? : Bool
-        @mutex.synchronize do
+        return false unless @mutex.try_lock
+        begin
           pending_start = @pending_start
           return true if pending_start.null?
 
           LibSystemAudioTap.system_audio_tap_start_is_finished(pending_start) == 1
+        ensure
+          @mutex.unlock
         end
       end
 

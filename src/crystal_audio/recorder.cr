@@ -225,7 +225,7 @@ end
         end
       end
 
-      @mutex : Mutex
+      @mutex : Thread::Mutex
       @queue : LibAudioToolbox::AudioQueueRef
       @ext_file : LibAudioToolbox::ExtAudioFileRef
       @system_tap : SystemAudioCapture?
@@ -247,7 +247,7 @@ end
         @output_path = output_path
         @mic_output_path = mic_output_path
         @recording = false
-        @mutex = Mutex.new
+        @mutex = Thread::Mutex.new
         @queue = Pointer(Void).null
         @ext_file = Pointer(Void).null
         @sys_ext_file = Pointer(Void).null
@@ -367,14 +367,17 @@ end
       # start is pending, or the pending one has finished on its dispatch
       # queue.
       def start_finished? : Bool
-        @mutex.synchronize do
+        return false unless @mutex.try_lock
+        begin
           pending_mic_start = @pending_mic_start
           unless pending_mic_start.null?
-            next false if LibAudioQueueStart.ca_audio_queue_start_is_finished(pending_mic_start) == 0
+            return false if LibAudioQueueStart.ca_audio_queue_start_is_finished(pending_mic_start) == 0
           end
 
           tap = @system_tap
           tap ? tap.start_finished? : true
+        ensure
+          @mutex.unlock
         end
       end
 

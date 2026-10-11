@@ -18,6 +18,7 @@ void pending_fixture_reset(int allocation, int creation) {
   atomic_store(&stop_thread_started, 0); atomic_store(&stop_thread_finished, 0);
 }
 void pending_fixture_release(void) { atomic_store(&is_released, 1); }
+void pending_fixture_release_after_delay(void) { usleep(200000); pending_fixture_release(); }
 void pending_fixture_stop_started(void) { atomic_store(&stop_thread_started, 1); }
 void pending_fixture_stop_finished(void) { atomic_store(&stop_thread_finished, 1); }
 int pending_fixture_wait_for_finish(void) {
