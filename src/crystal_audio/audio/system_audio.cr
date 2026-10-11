@@ -90,13 +90,15 @@
         getter start_status : Int32
         # True when the queue (if any) started, so the tap's creation was tried.
         getter? tap_attempted : Bool
+        # Distinguishes a missing tap from creation that returned OSStatus 0.
+        getter? tap_created : Bool
 
-        def initialize(@queue_status : Int32, @tap_attempted : Bool, @create_status : Int32, @start_status : Int32)
+        def initialize(@queue_status : Int32, @tap_attempted : Bool, @create_status : Int32, @start_status : Int32, @tap_created : Bool = true)
         end
 
         # True when the queue (if any) and the tap both started.
         def started? : Bool
-          queue_status == 0 && tap_attempted? && create_status == 0 && start_status == 0
+          queue_status == 0 && tap_attempted? && tap_created? && create_status == 0 && start_status == 0
         end
 
         # The message a synchronous start raises for the same tap failure, or
@@ -104,7 +106,7 @@
         # owner reports that).
         def error_message : String?
           return nil if started? || queue_status != 0
-          return "system_audio_tap_create failed: OSStatus #{create_status}" unless create_status == 0
+          return "system_audio_tap_create failed: OSStatus #{create_status}" unless create_status == 0 && tap_created?
 
           "system_audio_tap_start failed: OSStatus #{start_status}"
         end
@@ -114,12 +116,12 @@
       @box : Void*
       # A start running on a dispatch queue; null when none is pending.
       @pending_start : Void*
-      # The result of a start that ran synchronously because no pending start
-      # could be allocated; `finish_start` hands it out once.
-      @synchronous_start_result : StartResult?
+      # Serializes pending-pointer access across confirmation and stop callers.
+      @mutex = Thread::Mutex.new
 
       # Kept as a class-level collection so GC doesn't collect live captures
       @@active = [] of SystemAudioCapture
+      @@active_mutex = Thread::Mutex.new
 
       def initialize
         @handle = Pointer(Void).null
@@ -131,23 +133,25 @@
       # interleaved stereo samples at 48 kHz.
       # IMPORTANT: The block runs on a real-time thread. No Crystal allocations.
       def start(&callback : Slice(Float32), UInt32, UInt32 -> Nil)
-        raise "Already started" unless idle?
+        @mutex.synchronize do
+          raise "Already started" unless idle?
 
-        c_callback, boxed = retain_callback(callback)
-        err = 0_i32
-        handle = LibSystemAudioTap.system_audio_tap_create(c_callback, boxed, pointerof(err))
-        if handle.null?
-          release_callback
-          raise "system_audio_tap_create failed: OSStatus #{err}"
-        end
+          c_callback, boxed = retain_callback(callback)
+          err = 0_i32
+          handle = LibSystemAudioTap.system_audio_tap_create(c_callback, boxed, pointerof(err))
+          if handle.null?
+            release_callback
+            raise "system_audio_tap_create failed: OSStatus #{err}"
+          end
 
-        status = LibSystemAudioTap.system_audio_tap_start(handle)
-        unless status == 0
-          LibSystemAudioTap.system_audio_tap_destroy(handle)
-          release_callback
-          raise "system_audio_tap_start failed: OSStatus #{status}"
+          status = LibSystemAudioTap.system_audio_tap_start(handle)
+          unless status == 0
+            LibSystemAudioTap.system_audio_tap_destroy(handle)
+            release_callback
+            raise "system_audio_tap_start failed: OSStatus #{status}"
+          end
+          @handle = handle
         end
-        @handle = handle
       end
 
       # Begins the tap's creation and start on a dispatch queue and returns at
@@ -157,42 +161,48 @@
       # which `Recorder` starts a microphone-plus-system recording. Follow with
       # `finish_start` (once), which reports how the start ended.
       def start_without_waiting(start_first : LibAudioToolbox::AudioQueueRef = Pointer(Void).null, &callback : Slice(Float32), UInt32, UInt32 -> Nil) : Nil
-        raise "Already started" unless idle?
+        @mutex.synchronize do
+          raise "Already started" unless idle?
 
-        c_callback, boxed = retain_callback(callback)
-        pending_start = LibSystemAudioTap.system_audio_tap_start_async(c_callback, boxed, start_first)
-        if pending_start.null?
-          @synchronous_start_result = start_synchronously(c_callback, boxed, start_first)
-        else
+          c_callback, boxed = retain_callback(callback)
+          pending_start = LibSystemAudioTap.system_audio_tap_start_async(c_callback, boxed, start_first)
+          if pending_start.null?
+            release_callback
+            raise "system audio start could not be scheduled"
+          end
           @pending_start = pending_start
         end
       end
 
       # True while a start begun by `start_without_waiting` awaits `finish_start`.
       def start_pending? : Bool
-        !@pending_start.null? || !@synchronous_start_result.nil?
+        @mutex.synchronize { has_pending_start? }
       end
 
       # True when `finish_start` would return without waiting: no start is
       # pending, or the pending one has finished on its dispatch queue.
       def start_finished? : Bool
-        pending_start = @pending_start
-        return true if pending_start.null?
+        return false unless @mutex.try_lock
+        begin
+          pending_start = @pending_start
+          return true if pending_start.null?
 
-        LibSystemAudioTap.system_audio_tap_start_is_finished(pending_start) == 1
+          LibSystemAudioTap.system_audio_tap_start_is_finished(pending_start) == 1
+        ensure
+          @mutex.unlock
+        end
       end
 
       # Waits until the input queue given to `start_without_waiting` has
       # started, and returns its AudioQueueStart status (0 when no queue was
       # given or no start is pending). The tap may still be starting.
       def wait_for_queue_start : Int32
-        if result = @synchronous_start_result
-          return result.queue_status
-        end
-        pending_start = @pending_start
-        return 0 if pending_start.null?
+        @mutex.synchronize do
+          pending_start = @pending_start
+          return 0 if pending_start.null?
 
-        LibSystemAudioTap.system_audio_tap_wait_for_queue_start(pending_start)
+          LibSystemAudioTap.system_audio_tap_wait_for_queue_start(pending_start)
+        end
       end
 
       # Waits for the start begun by `start_without_waiting` and reports how it
@@ -200,34 +210,41 @@
       # nothing of the tap remains. Returns a started result with no queue when
       # no start is pending.
       def finish_start : StartResult
+        @mutex.synchronize { finish_start_under_lock }
+      end
+
+      private def finish_start_under_lock : StartResult
         result = take_start_result
         release_callback unless result.started?
         result
       end
 
       def stop
-        finish_start if start_pending?
-        return if @handle.null?
-        LibSystemAudioTap.system_audio_tap_stop(@handle)
-        LibSystemAudioTap.system_audio_tap_destroy(@handle)
-        @handle = Pointer(Void).null
-        release_callback
+        @mutex.synchronize do
+          finish_start_under_lock if has_pending_start?
+          return if @handle.null?
+          LibSystemAudioTap.system_audio_tap_stop(@handle)
+          LibSystemAudioTap.system_audio_tap_destroy(@handle)
+          @handle = Pointer(Void).null
+          release_callback
+        end
       end
 
       def active? : Bool
-        !@handle.null?
+        @mutex.synchronize do
+          !@handle.null?
+        end
       end
 
       private def idle? : Bool
-        @handle.null? && !start_pending?
+        @handle.null? && !has_pending_start?
+      end
+
+      private def has_pending_start? : Bool
+        !@pending_start.null?
       end
 
       private def take_start_result : StartResult
-        if result = @synchronous_start_result
-          @synchronous_start_result = nil
-          return result
-        end
-
         pending_start = @pending_start
         return StartResult.new(0, true, 0, 0) if pending_start.null?
 
@@ -241,28 +258,8 @@
           pointerof(create_status), pointerof(start_status)
         )
         @handle = handle
-        StartResult.new(queue_status, was_tap_attempted == 1, create_status, start_status)
-      end
-
-      # The start `start_without_waiting` falls back to on this thread when the
-      # C side could not allocate a pending start.
-      private def start_synchronously(c_callback : LibSystemAudioTap::Callback, boxed : Void*, start_first : LibAudioToolbox::AudioQueueRef) : StartResult
-        unless start_first.null?
-          queue_status = LibAudioToolbox.AudioQueueStart(start_first, nil)
-          return StartResult.new(queue_status, false, 0, 0) unless queue_status == 0
-        end
-
-        err = 0_i32
-        handle = LibSystemAudioTap.system_audio_tap_create(c_callback, boxed, pointerof(err))
-        return StartResult.new(0, true, err == 0 ? UNSPECIFIED_ERROR : err, 0) if handle.null?
-
-        status = LibSystemAudioTap.system_audio_tap_start(handle)
-        unless status == 0
-          LibSystemAudioTap.system_audio_tap_destroy(handle)
-          return StartResult.new(0, true, 0, status)
-        end
-        @handle = handle
-        StartResult.new(0, true, 0, 0)
+        was_tap_created = !handle.null? || start_status != 0
+        StartResult.new(queue_status, was_tap_attempted == 1, create_status, start_status, was_tap_created)
       end
 
       # Boxes *callback* for the C side and keeps this capture reachable from
@@ -271,7 +268,7 @@
       private def retain_callback(callback : Proc(Slice(Float32), UInt32, UInt32, Nil)) : {LibSystemAudioTap::Callback, Void*}
         boxed = Box.box(callback)
         @box = boxed
-        @@active << self
+        @@active_mutex.synchronize { @@active << self }
 
         c_callback = LibSystemAudioTap::Callback.new do |frames_ptr, frame_count, channel_count, ctx|
           blk = Box(Proc(Slice(Float32), UInt32, UInt32, Nil)).unbox(ctx)
@@ -282,7 +279,7 @@
       end
 
       private def release_callback : Nil
-        @@active.delete(self)
+        @@active_mutex.synchronize { @@active.delete(self) }
         @box = Pointer(Void).null
       end
     end
