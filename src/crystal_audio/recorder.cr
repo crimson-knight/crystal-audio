@@ -74,6 +74,13 @@ end
       def wait_until_started : Nil
       end
 
+      def wait_until_microphone_started : Nil
+      end
+
+      def start_finished? : Bool
+        true
+      end
+
       def stop
         return unless @recording
         @android_recorder.try(&.stop)
@@ -114,6 +121,7 @@ end
   lib LibAudioQueueStart
     fun ca_audio_queue_start_async(queue : LibAudioToolbox::AudioQueueRef) : Void*
     fun ca_audio_queue_start_wait(handle : Void*) : Int32
+    fun ca_audio_queue_start_is_finished(handle : Void*) : Int32
     fun ca_audio_input_warm_up_async(device_uid : UInt8*) : Void
   end
 
@@ -159,6 +167,15 @@ end
   #   rec.start_without_waiting
   #   # ... other work on this thread while the device spins up ...
   #   rec.wait_until_started # raises if the device did not start
+  #
+  # Example — start a microphone-plus-system recording without blocking the
+  # calling thread, and confirm the system tap later:
+  #
+  #   rec = CrystalAudio::Recorder.new(source: :both, output_path: "/tmp/meeting.wav")
+  #   rec.start_without_waiting         # the microphone, then the tap, start on a dispatch queue
+  #   rec.wait_until_microphone_started # raises if the microphone did not start
+  #   # ... once rec.start_finished? is true, this returns without waiting:
+  #   rec.wait_until_started # raises if the system tap did not start
   #
   # Example — record both streams in parallel:
   #
@@ -263,50 +280,101 @@ end
           when RecordingSource::Both
             mic_path = @mic_output_path || derive_mic_path(@output_path)
             start_mic_queue(mic_path)
-            start_system_tap(@output_path)
+            begin
+              start_system_tap(@output_path)
+            rescue ex
+              stop_mic_queue
+              raise ex
+            end
           end
 
           @recording = true
         end
       end
 
-      # Starts a microphone recording without waiting for the input device:
-      # the WAV file and the AudioQueue are ready when this returns, and
-      # AudioQueueStart runs on a dispatch queue. Call `wait_until_started`
-      # before relying on the recording; `recording?` is true from here on.
-      # System and Both sources start synchronously, as `start` does.
+      # Starts a recording without waiting for its devices: the WAV files and
+      # the input AudioQueue are ready when this returns, and the slow work
+      # runs on a dispatch queue. A microphone source runs AudioQueueStart
+      # there. A system source creates and starts the system-audio tap
+      # there. Both runs the microphone's AudioQueueStart and then, once the
+      # microphone started, the tap's creation and start, in the order
+      # `start` uses. `recording?` is true from here on; call
+      # `wait_until_started` (or `wait_until_microphone_started` first)
+      # before relying on the recording.
       def start_without_waiting : Nil
-        unless @source.microphone?
-          start
-          return
-        end
-
         @mutex.synchronize do
           raise "Already recording" if @recording
 
-          create_mic_queue(@output_path)
-          pending_start = LibAudioQueueStart.ca_audio_queue_start_async(@queue)
-          if pending_start.null?
-            start_created_mic_queue
-          else
-            @pending_mic_start = pending_start
+          case @source
+          when RecordingSource::Microphone
+            create_mic_queue(@output_path)
+            begin_mic_queue_start
+          when RecordingSource::System
+            begin_system_tap_start(@output_path, Pointer(Void).null)
+          when RecordingSource::Both
+            create_mic_queue(@mic_output_path || derive_mic_path(@output_path))
+            begin
+              begin_system_tap_start(@output_path, @queue)
+            rescue ex
+              dispose_unstarted_mic_queue
+              raise ex
+            end
           end
           @recording = true
         end
       end
 
-      # Waits for the AudioQueueStart begun by `start_without_waiting`.
-      # Returns at once when no start is pending. When the device did not
-      # start, the queue and the WAV file are disposed, `recording?` turns
-      # false, and this raises.
+      # Waits for the start begun by `start_without_waiting`: the microphone
+      # and, for a system or Both source, the system-audio tap. Returns at
+      # once when no start is pending. When anything did not start, every
+      # queue, tap and WAV file of the recording is disposed, `recording?`
+      # turns false, and this raises the error `start` raises for the same
+      # failure ("AudioQueueStart failed: …", "system_audio_tap_create
+      # failed: …" or "system_audio_tap_start failed: …").
       def wait_until_started : Nil
         @mutex.synchronize do
-          status = take_pending_mic_start_status
-          return if status == 0
+          error_message = finish_pending_start
+          return unless error_message
 
-          dispose_unstarted_mic_queue
           @recording = false
-          raise "AudioQueueStart failed: #{status}"
+          raise error_message
+        end
+      end
+
+      # Waits only until the microphone of the start begun by
+      # `start_without_waiting` runs; a Both source's system tap may still
+      # be starting, and `wait_until_started` confirms it. Returns at once
+      # for a system source or when no start is pending. When the microphone
+      # did not start, the whole recording is disposed as in
+      # `wait_until_started`, and this raises.
+      def wait_until_microphone_started : Nil
+        @mutex.synchronize do
+          if tap = @system_tap
+            return if tap.wait_for_queue_start == 0
+          elsif @pending_mic_start.null?
+            return
+          end
+
+          error_message = finish_pending_start
+          return unless error_message
+
+          @recording = false
+          raise error_message
+        end
+      end
+
+      # True when `wait_until_started` would return without waiting: no
+      # start is pending, or the pending one has finished on its dispatch
+      # queue.
+      def start_finished? : Bool
+        @mutex.synchronize do
+          pending_mic_start = @pending_mic_start
+          unless pending_mic_start.null?
+            next false if LibAudioQueueStart.ca_audio_queue_start_is_finished(pending_mic_start) == 0
+          end
+
+          tap = @system_tap
+          tap ? tap.start_finished? : true
         end
       end
 
@@ -314,7 +382,7 @@ end
         @mutex.synchronize do
           return unless @recording
 
-          take_pending_mic_start_status
+          finish_pending_start
           stop_mic_queue
           stop_system_tap
 
@@ -327,6 +395,46 @@ end
       private def start_mic_queue(path : String)
         create_mic_queue(path)
         start_created_mic_queue
+      end
+
+      # Begins AudioQueueStart on the created queue on a dispatch queue, or
+      # starts it here when no pending start could be allocated.
+      private def begin_mic_queue_start : Nil
+        pending_start = LibAudioQueueStart.ca_audio_queue_start_async(@queue)
+        if pending_start.null?
+          start_created_mic_queue
+        else
+          @pending_mic_start = pending_start
+        end
+      end
+
+      # Waits for whatever `start_without_waiting` left pending and returns
+      # the error message of the first step that failed, in start order
+      # (microphone, tap creation, tap start), or nil when everything
+      # started or nothing was pending. On a failure every queue, tap and
+      # WAV file of the recording is already disposed.
+      private def finish_pending_start : String?
+        mic_status = take_pending_mic_start_status
+        unless mic_status == 0
+          dispose_unstarted_mic_queue
+          return "AudioQueueStart failed: #{mic_status}"
+        end
+
+        tap = @system_tap
+        return nil unless tap && tap.start_pending?
+
+        result = tap.finish_start
+        return nil if result.started?
+
+        @system_tap = nil
+        dispose_system_ext_file
+        if result.queue_status != 0
+          dispose_unstarted_mic_queue
+          return "AudioQueueStart failed: #{result.queue_status}"
+        end
+
+        stop_mic_queue
+        result.error_message
       end
 
       # The status of the pending dispatch-queue start, after waiting for
@@ -432,27 +540,61 @@ end
       # ── Private: system audio tap ───────────────────────────────────────────
 
       private def start_system_tap(path : String)
-        asbd = system_asbd
-        @sys_ext_file = open_ext_file(path, asbd)
-        sys_file_ref = @sys_ext_file # local for callback capture
-
-        @system_tap = SystemAudioCapture.new
-        @system_tap.not_nil!.start do |frames, frame_count, channel_count|
-          bytes_per_frame = channel_count * 4_u32 # float32
-          LibAudioWriteHelper.ca_ext_audio_file_write_pcm(
-            sys_file_ref,
-            frames.to_unsafe.as(Void*),
-            frame_count * bytes_per_frame,
-            channel_count,
-            bytes_per_frame
-          )
+        sys_file_ref = open_system_ext_file(path)
+        tap = SystemAudioCapture.new
+        begin
+          tap.start do |frames, frame_count, channel_count|
+            Recorder.write_system_frames(sys_file_ref, frames, frame_count, channel_count)
+          end
+        rescue ex
+          dispose_system_ext_file
+          raise ex
         end
+        @system_tap = tap
+      end
+
+      # Opens the system WAV file here and begins the tap's creation and
+      # start on a dispatch queue, after *start_first* (the microphone's
+      # queue, or null) starts on the same dispatch job.
+      private def begin_system_tap_start(path : String, start_first : LibAudioToolbox::AudioQueueRef) : Nil
+        sys_file_ref = open_system_ext_file(path)
+        tap = SystemAudioCapture.new
+        begin
+          tap.start_without_waiting(start_first) do |frames, frame_count, channel_count|
+            Recorder.write_system_frames(sys_file_ref, frames, frame_count, channel_count)
+          end
+        rescue ex
+          dispose_system_ext_file
+          raise ex
+        end
+        @system_tap = tap
+      end
+
+      private def open_system_ext_file(path : String) : LibAudioToolbox::ExtAudioFileRef
+        @sys_ext_file = open_ext_file(path, system_asbd)
+      end
+
+      # :nodoc:
+      # Writes one tap buffer to the system WAV. Runs on the tap's real-time
+      # thread, so it allocates nothing.
+      def self.write_system_frames(sys_file_ref : LibAudioToolbox::ExtAudioFileRef, frames : Slice(Float32), frame_count : UInt32, channel_count : UInt32) : Nil
+        bytes_per_frame = channel_count * 4_u32 # float32
+        LibAudioWriteHelper.ca_ext_audio_file_write_pcm(
+          sys_file_ref,
+          frames.to_unsafe.as(Void*),
+          frame_count * bytes_per_frame,
+          channel_count,
+          bytes_per_frame
+        )
       end
 
       private def stop_system_tap
         @system_tap.try(&.stop)
         @system_tap = nil
+        dispose_system_ext_file
+      end
 
+      private def dispose_system_ext_file : Nil
         LibAudioToolbox.ExtAudioFileDispose(@sys_ext_file) unless @sys_ext_file.null?
         @sys_ext_file = Pointer(Void).null
       end

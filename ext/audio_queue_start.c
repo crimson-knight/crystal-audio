@@ -8,6 +8,7 @@
 
 #include <AudioToolbox/AudioToolbox.h>
 #include <dispatch/dispatch.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -15,11 +16,13 @@ typedef struct {
     AudioQueueRef queue;
     dispatch_semaphore_t done;
     OSStatus status;
+    _Atomic int is_finished;
 } ca_audio_queue_start_t;
 
 static void ca_audio_queue_start_run(void *context) {
     ca_audio_queue_start_t *start = (ca_audio_queue_start_t *)context;
     start->status = AudioQueueStart(start->queue, NULL);
+    atomic_store_explicit(&start->is_finished, 1, memory_order_release);
     dispatch_semaphore_signal(start->done);
 }
 
@@ -38,6 +41,14 @@ void *ca_audio_queue_start_async(AudioQueueRef queue) {
     dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0),
                      start, ca_audio_queue_start_run);
     return start;
+}
+
+// Returns 1 once the start begun by ca_audio_queue_start_async has returned,
+// so ca_audio_queue_start_wait will not wait, and 0 while it runs.
+int ca_audio_queue_start_is_finished(void *handle) {
+    ca_audio_queue_start_t *start = (ca_audio_queue_start_t *)handle;
+    if (!start) return 1;
+    return atomic_load_explicit(&start->is_finished, memory_order_acquire);
 }
 
 // Waits for the start begun by ca_audio_queue_start_async, frees the handle,

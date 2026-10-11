@@ -37,6 +37,9 @@
 
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 
+#import <AudioToolbox/AudioToolbox.h>
+
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -747,4 +750,176 @@ void system_audio_tap_destroy(SystemAudioTapHandle *handle) {
     }
 
     free(handle);
+}
+
+/* =========================================================================
+ * Starting a tap without blocking the caller
+ *
+ * Creating a process tap and its aggregate device, and starting the device,
+ * wait on the audio server (tens of milliseconds, more for the first tap in
+ * a process). system_audio_tap_start_async runs that work on a dispatch
+ * queue, in plain C, so the calling thread (often AppKit's main thread)
+ * keeps working and no Crystal code runs on a foreign thread.
+ *
+ * When `queue_to_start_first` is not NULL, the same dispatch job first runs
+ * AudioQueueStart on that input queue and creates the tap only after the
+ * queue started, in the order a synchronous microphone-plus-system start
+ * uses. A queue that fails to start leaves the tap uncreated.
+ *
+ * The semaphores are held as retained CF-bridged pointers because this file
+ * compiles with ARC, which keeps no Objective-C object in a calloc'd struct.
+ * ====================================================================== */
+
+typedef struct SystemAudioTapPendingStart {
+    AudioQueueRef          queue_to_start_first;
+    SystemAudioCallback    callback;
+    void                  *context;
+    void                  *queue_started;  /* dispatch_semaphore_t, retained */
+    void                  *finished;       /* dispatch_semaphore_t, retained */
+    _Atomic int            is_finished;
+    int                    has_taken_queue_status;
+    OSStatus               queue_status;   /* noErr when no queue was given */
+    OSStatus               create_status;  /* system_audio_tap_create's error */
+    OSStatus               start_status;   /* system_audio_tap_start's status */
+    int                    was_tap_attempted;
+    SystemAudioTapHandle  *handle;         /* the started tap, or NULL */
+} SystemAudioTapPendingStart;
+
+static void system_audio_tap_start_run(void *argument) {
+    SystemAudioTapPendingStart *pending = (SystemAudioTapPendingStart *)argument;
+
+    pending->queue_status = noErr;
+    if (pending->queue_to_start_first) {
+        pending->queue_status = AudioQueueStart(pending->queue_to_start_first, NULL);
+    }
+    dispatch_semaphore_signal((__bridge dispatch_semaphore_t)pending->queue_started);
+
+    if (pending->queue_status == noErr) {
+        pending->was_tap_attempted = 1;
+        OSStatus create_status = noErr;
+        SystemAudioTapHandle *handle =
+            system_audio_tap_create(pending->callback, pending->context, &create_status);
+        if (!handle) {
+            pending->create_status = (create_status != noErr)
+                                     ? create_status
+                                     : kAudioHardwareUnspecifiedError;
+        } else {
+            pending->start_status = system_audio_tap_start(handle);
+            if (pending->start_status == noErr) {
+                pending->handle = handle;
+            } else {
+                system_audio_tap_destroy(handle);
+            }
+        }
+    }
+
+    atomic_store_explicit(&pending->is_finished, 1, memory_order_release);
+    dispatch_semaphore_signal((__bridge dispatch_semaphore_t)pending->finished);
+}
+
+/*
+ * system_audio_tap_start_async
+ *
+ * Begins AudioQueueStart(queue_to_start_first) when a queue is given, then
+ * system_audio_tap_create and system_audio_tap_start, all on one
+ * user-interactive dispatch job, and returns at once. Returns a pending
+ * start for the functions below, or NULL when it could not be allocated
+ * (the caller then starts synchronously). Exactly one
+ * system_audio_tap_finish_start call must follow; it frees the pending start.
+ */
+void *system_audio_tap_start_async(SystemAudioCallback  callback,
+                                   void                *context,
+                                   AudioQueueRef        queue_to_start_first)
+{
+    SystemAudioTapPendingStart *pending =
+        (SystemAudioTapPendingStart *)calloc(1, sizeof(SystemAudioTapPendingStart));
+    if (!pending) return NULL;
+
+    dispatch_semaphore_t queue_started = dispatch_semaphore_create(0);
+    dispatch_semaphore_t finished = dispatch_semaphore_create(0);
+    if (!queue_started || !finished) {
+        free(pending);
+        return NULL;
+    }
+    pending->queue_started = (__bridge_retained void *)queue_started;
+    pending->finished = (__bridge_retained void *)finished;
+    pending->queue_to_start_first = queue_to_start_first;
+    pending->callback = callback;
+    pending->context = context;
+    pending->create_status = noErr;
+    pending->start_status = noErr;
+    atomic_init(&pending->is_finished, 0);
+
+    dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0),
+                     pending, system_audio_tap_start_run);
+    return pending;
+}
+
+/*
+ * system_audio_tap_wait_for_queue_start
+ *
+ * Waits until the queue given to system_audio_tap_start_async has started,
+ * or failed to, and returns AudioQueueStart's status: noErr when no queue was
+ * given. The tap may still be starting when this returns.
+ */
+OSStatus system_audio_tap_wait_for_queue_start(void *pending_start) {
+    SystemAudioTapPendingStart *pending = (SystemAudioTapPendingStart *)pending_start;
+    if (!pending) return kAudioHardwareBadObjectError;
+    if (!pending->has_taken_queue_status) {
+        dispatch_semaphore_wait((__bridge dispatch_semaphore_t)pending->queue_started,
+                                DISPATCH_TIME_FOREVER);
+        pending->has_taken_queue_status = 1;
+    }
+    return pending->queue_status;
+}
+
+/*
+ * system_audio_tap_start_is_finished
+ *
+ * Returns 1 once the dispatch job has returned, so
+ * system_audio_tap_finish_start will not wait, and 0 while it runs.
+ */
+int system_audio_tap_start_is_finished(void *pending_start) {
+    SystemAudioTapPendingStart *pending = (SystemAudioTapPendingStart *)pending_start;
+    if (!pending) return 1;
+    return atomic_load_explicit(&pending->is_finished, memory_order_acquire);
+}
+
+/*
+ * system_audio_tap_finish_start
+ *
+ * Waits for the dispatch job, reports each step's status, frees the pending
+ * start, and returns the started tap (the caller owns it and frees it with
+ * system_audio_tap_destroy), or NULL when the queue, the tap's creation or
+ * its start failed. *was_tap_attempted is 0 when the queue failed first.
+ */
+SystemAudioTapHandle *system_audio_tap_finish_start(void     *pending_start,
+                                                    OSStatus *queue_status,
+                                                    int      *was_tap_attempted,
+                                                    OSStatus *create_status,
+                                                    OSStatus *start_status)
+{
+    SystemAudioTapPendingStart *pending = (SystemAudioTapPendingStart *)pending_start;
+    if (!pending) {
+        if (queue_status) *queue_status = noErr;
+        if (was_tap_attempted) *was_tap_attempted = 0;
+        if (create_status) *create_status = kAudioHardwareBadObjectError;
+        if (start_status) *start_status = noErr;
+        return NULL;
+    }
+
+    dispatch_semaphore_t queue_started = (__bridge_transfer dispatch_semaphore_t)pending->queue_started;
+    dispatch_semaphore_t finished = (__bridge_transfer dispatch_semaphore_t)pending->finished;
+    if (!pending->has_taken_queue_status) {
+        dispatch_semaphore_wait(queue_started, DISPATCH_TIME_FOREVER);
+    }
+    dispatch_semaphore_wait(finished, DISPATCH_TIME_FOREVER);
+
+    if (queue_status) *queue_status = pending->queue_status;
+    if (was_tap_attempted) *was_tap_attempted = pending->was_tap_attempted;
+    if (create_status) *create_status = pending->create_status;
+    if (start_status) *start_status = pending->start_status;
+    SystemAudioTapHandle *handle = pending->handle;
+    free(pending);
+    return handle;
 }

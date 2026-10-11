@@ -53,3 +53,41 @@ void system_audio_tap_destroy(SystemAudioTapHandle *handle)
 {
     (void)handle;
 }
+
+/* The non-blocking start: no pending start can be made on iOS, so callers
+ * take their synchronous path, whose system_audio_tap_create fails above. */
+void *system_audio_tap_start_async(SystemAudioCallback callback,
+                                   void               *context,
+                                   void               *queue_to_start_first)
+{
+    (void)callback;
+    (void)context;
+    (void)queue_to_start_first;
+    return (void *)0;
+}
+
+int32_t system_audio_tap_wait_for_queue_start(void *pending_start)
+{
+    (void)pending_start;
+    return -50;
+}
+
+int system_audio_tap_start_is_finished(void *pending_start)
+{
+    (void)pending_start;
+    return 1;
+}
+
+SystemAudioTapHandle *system_audio_tap_finish_start(void    *pending_start,
+                                                    int32_t *queue_status,
+                                                    int     *was_tap_attempted,
+                                                    int32_t *create_status,
+                                                    int32_t *start_status)
+{
+    (void)pending_start;
+    if (queue_status) *queue_status = 0;
+    if (was_tap_attempted) *was_tap_attempted = 0;
+    if (create_status) *create_status = -50;
+    if (start_status) *start_status = 0;
+    return (SystemAudioTapHandle *)0;
+}
